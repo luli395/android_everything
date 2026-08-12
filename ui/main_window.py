@@ -1,0 +1,588 @@
+"""
+Main application window for Android Everything.
+"""
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import threading
+from typing import Optional
+import os
+
+from ui.styles import COLORS, FONTS, apply_dark_theme
+from ui.file_list import FileListView
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from config import WINDOW_TITLE, WINDOW_WIDTH, WINDOW_HEIGHT, SEARCH_DELAY_MS
+from adb_wrapper import get_adb, ADBWrapper, DeviceInfo, ADBError
+from file_indexer import get_indexer, FileIndexer
+from search_engine import get_search_engine, SearchEngine
+
+
+class MainWindow:
+    """Main application window."""
+    
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title(WINDOW_TITLE)
+        self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
+        self.root.minsize(800, 600)
+        
+        # Set window icon (optional)
+        try:
+            self.root.iconbitmap(default="")
+        except:
+            pass
+        
+        # Apply theme
+        apply_dark_theme(self.root)
+        
+        # Initialize components
+        try:
+            self.adb = get_adb()
+        except ADBError as e:
+            messagebox.showerror("ADB Error", str(e))
+            self.adb = None
+        
+        self.indexer = get_indexer()
+        self.search_engine = get_search_engine()
+        
+        # State
+        self._devices: list[DeviceInfo] = []
+        self._current_device: Optional[str] = None
+        self._search_timer: Optional[str] = None
+        
+        # Build UI
+        self._setup_ui()
+        
+        # Initial device check
+        self.root.after(100, self._refresh_devices)
+    
+    def _setup_ui(self):
+        """Set up the main UI layout."""
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
+        
+        # Header
+        self._create_header()
+        
+        # Main content area
+        self._create_content()
+        
+        # Status bar
+        self._create_statusbar()
+    
+    def _create_header(self):
+        """Create the header with search bar and controls."""
+        header = ttk.Frame(self.root, style="Card.TFrame", padding=15)
+        header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        header.columnconfigure(1, weight=1)
+        
+        # App title
+        title_frame = ttk.Frame(header, style="Card.TFrame")
+        title_frame.grid(row=0, column=0, sticky="w", padx=(0, 20))
+        
+        ttk.Label(
+            title_frame,
+            text="Android",
+            style="Title.TLabel"
+        ).pack(side="left")
+        
+        ttk.Label(
+            title_frame,
+            text="Everything",
+            style="Title.TLabel",
+            foreground=COLORS["text_primary"]
+        ).pack(side="left")
+        
+        # Search bar
+        search_frame = ttk.Frame(header, style="Card.TFrame")
+        search_frame.grid(row=0, column=1, sticky="ew", padx=10)
+        search_frame.columnconfigure(0, weight=1)
+        
+        self.search_var = tk.StringVar()
+        self.search_var.trace_add("write", self._on_search_changed)
+        
+        self.search_entry = ttk.Entry(
+            search_frame,
+            textvariable=self.search_var,
+            font=FONTS["heading"]
+        )
+        self.search_entry.grid(row=0, column=0, sticky="ew", ipady=8)
+        self.search_entry.bind("<Return>", lambda e: self._do_search())
+        
+        # Placeholder text
+        self.search_entry.insert(0, "Search files...")
+        self.search_entry.bind("<FocusIn>", self._on_search_focus_in)
+        self.search_entry.bind("<FocusOut>", self._on_search_focus_out)
+        self._search_has_focus = False
+        
+        # Extension filter
+        ttk.Label(
+            search_frame,
+            text="Type:",
+            style="Muted.TLabel"
+        ).grid(row=0, column=1, padx=(10, 5))
+        
+        self.ext_var = tk.StringVar(value="All")
+        self.ext_combo = ttk.Combobox(
+            search_frame,
+            textvariable=self.ext_var,
+            values=["All"],
+            width=10,
+            state="readonly"
+        )
+        self.ext_combo.grid(row=0, column=2)
+        self.ext_combo.bind("<<ComboboxSelected>>", lambda e: self._do_search())
+        
+        # Controls
+        controls_frame = ttk.Frame(header, style="Card.TFrame")
+        controls_frame.grid(row=0, column=2, sticky="e", padx=(20, 0))
+        
+        # Device selector
+        ttk.Label(
+            controls_frame,
+            text="Device:",
+            style="Muted.TLabel"
+        ).pack(side="left", padx=(0, 5))
+        
+        self.device_var = tk.StringVar(value="No device")
+        self.device_combo = ttk.Combobox(
+            controls_frame,
+            textvariable=self.device_var,
+            values=[],
+            width=20,
+            state="readonly"
+        )
+        self.device_combo.pack(side="left", padx=(0, 10))
+        self.device_combo.bind("<<ComboboxSelected>>", self._on_device_selected)
+        
+        # Refresh button
+        self.refresh_btn = ttk.Button(
+            controls_frame,
+            text="🔄 Refresh",
+            command=self._refresh_devices,
+            width=10
+        )
+        self.refresh_btn.pack(side="left", padx=(0, 5))
+        
+        # Index button
+        self.index_btn = ttk.Button(
+            controls_frame,
+            text="📥 Index",
+            style="Accent.TButton",
+            command=self._start_indexing,
+            width=10
+        )
+        self.index_btn.pack(side="left")
+    
+    def _create_content(self):
+        """Create the main content area with file list."""
+        content = ttk.Frame(self.root)
+        content.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(0, weight=1)
+        
+        # File list
+        self.file_list = FileListView(
+            content,
+            on_double_click=self._on_file_double_click,
+            on_right_click=self._on_file_right_click
+        )
+        self.file_list.grid(row=0, column=0, sticky="nsew")
+        
+        # Context menu
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.configure(
+            bg=COLORS["bg_medium"],
+            fg=COLORS["text_primary"],
+            activebackground=COLORS["accent"],
+            activeforeground=COLORS["text_primary"],
+            font=FONTS["body"]
+        )
+        self.context_menu.add_command(label="📥 Pull to PC", command=self._pull_selected)
+        self.context_menu.add_command(label="📂 Show in Explorer", command=self._show_in_explorer)
+        self.context_menu.add_command(label="📋 Copy Path", command=self._copy_path)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="🗑️ Delete", command=self._delete_selected)
+    
+    def _create_statusbar(self):
+        """Create the status bar."""
+        statusbar = ttk.Frame(self.root, style="Card.TFrame", padding=8)
+        statusbar.grid(row=2, column=0, sticky="ew", padx=10, pady=(5, 10))
+        statusbar.columnconfigure(1, weight=1)
+        
+        # Status message
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(
+            statusbar,
+            textvariable=self.status_var,
+            style="Muted.TLabel"
+        ).grid(row=0, column=0, sticky="w")
+        
+        # Progress bar
+        self.progress = ttk.Progressbar(
+            statusbar,
+            mode="determinate",
+            length=200
+        )
+        self.progress.grid(row=0, column=1, sticky="e", padx=10)
+        self.progress.grid_remove()  # Hidden by default
+        
+        # File count
+        self.count_var = tk.StringVar(value="0 files")
+        ttk.Label(
+            statusbar,
+            textvariable=self.count_var,
+            style="Muted.TLabel"
+        ).grid(row=0, column=2, sticky="e")
+    
+    def _on_search_focus_in(self, event):
+        """Handle search entry focus in."""
+        if not self._search_has_focus:
+            self._search_has_focus = True
+            if self.search_entry.get() == "Search files...":
+                self.search_entry.delete(0, "end")
+    
+    def _on_search_focus_out(self, event):
+        """Handle search entry focus out."""
+        if not self.search_entry.get():
+            self._search_has_focus = False
+            self.search_entry.insert(0, "Search files...")
+    
+    def _on_search_changed(self, *args):
+        """Handle search text change with debounce."""
+        if self._search_timer:
+            self.root.after_cancel(self._search_timer)
+        
+        self._search_timer = self.root.after(SEARCH_DELAY_MS, self._do_search)
+    
+    def _do_search(self):
+        """Execute the search."""
+        if not self._current_device:
+            return
+        
+        query = self.search_var.get()
+        if query == "Search files...":
+            query = ""
+        
+        # Get extension filter
+        ext_filter = None
+        if self.ext_var.get() != "All":
+            ext_filter = "." + self.ext_var.get().lower()
+        
+        # Search
+        results = self.search_engine.search(
+            self._current_device,
+            query,
+            extension_filter=ext_filter
+        )
+        
+        # Update file list
+        self.file_list.set_files(results)
+        self.count_var.set(f"{len(results):,} files")
+    
+    def _refresh_devices(self):
+        """Refresh the list of connected devices."""
+        if not self.adb:
+            return
+        
+        try:
+            self._devices = self.adb.get_devices()
+            
+            if self._devices:
+                device_names = [
+                    f"{d.model or d.serial} ({d.state})" 
+                    for d in self._devices
+                ]
+                self.device_combo.configure(values=device_names)
+                
+                # Auto-select first device
+                if not self._current_device or self._current_device not in [d.serial for d in self._devices]:
+                    self.device_combo.current(0)
+                    self._on_device_selected(None)
+                
+                self.status_var.set(f"{len(self._devices)} device(s) connected")
+            else:
+                self.device_combo.configure(values=["No device"])
+                self.device_var.set("No device")
+                self._current_device = None
+                self.status_var.set("No devices found. Enable USB debugging on your phone.")
+                
+        except ADBError as e:
+            self.status_var.set(f"ADB Error: {e}")
+    
+    def _on_device_selected(self, event):
+        """Handle device selection."""
+        idx = self.device_combo.current()
+        if idx >= 0 and idx < len(self._devices):
+            device = self._devices[idx]
+            self._current_device = device.serial
+            self.adb.select_device(device.serial)
+            
+            # Load file count
+            count = self.search_engine.get_file_count(device.serial)
+            if count > 0:
+                self.count_var.set(f"{count:,} files indexed")
+                self._do_search()
+                
+                # Update extension filter
+                stats = self.search_engine.get_extension_stats(device.serial)
+                exts = ["All"] + [ext.upper().lstrip(".") for ext, _ in stats if ext]
+                self.ext_combo.configure(values=exts)
+            else:
+                self.count_var.set("Not indexed - click Index")
+                self.file_list.clear()
+    
+    def _start_indexing(self):
+        """Start indexing the current device."""
+        if not self._current_device:
+            messagebox.showwarning("No Device", "Please connect and select a device first.")
+            return
+        
+        if self.indexer.is_indexing:
+            self.indexer.cancel()
+            self.index_btn.configure(text="📥 Index")
+            return
+        
+        self.index_btn.configure(text="⏹️ Stop")
+        self.progress.grid()
+        self.progress["value"] = 0
+        
+        def on_progress(message: str, current: int, total: int):
+            self.root.after(0, lambda: self._update_progress(message, current, total))
+        
+        def on_complete(count: int):
+            self.root.after(0, lambda: self._on_indexing_complete(count))
+        
+        self.indexer.index_device(
+            self._current_device,
+            progress_callback=on_progress,
+            complete_callback=on_complete
+        )
+    
+    def _update_progress(self, message: str, current: int, total: int):
+        """Update progress bar and status."""
+        self.status_var.set(message)
+        self.progress["value"] = current
+    
+    def _on_indexing_complete(self, count: int):
+        """Handle indexing completion."""
+        self.index_btn.configure(text="📥 Index")
+        self.progress.grid_remove()
+        self.count_var.set(f"{count:,} files indexed")
+        
+        # Update extension filter
+        stats = self.search_engine.get_extension_stats(self._current_device)
+        exts = ["All"] + [ext.upper().lstrip(".") for ext, _ in stats if ext]
+        self.ext_combo.configure(values=exts)
+        
+        # Clear cache and refresh results
+        self.search_engine.clear_cache()
+        self._do_search()
+    
+    def _on_file_double_click(self, file: dict):
+        """Handle double-click on a file - download and open."""
+        remote_path = file.get("path", "")
+        filename = file.get("name", "file")
+        if not remote_path:
+            return
+        
+        # Download to temp folder and open
+        import tempfile
+        temp_dir = os.path.join(tempfile.gettempdir(), "android_everything")
+        os.makedirs(temp_dir, exist_ok=True)
+        local_path = os.path.join(temp_dir, filename)
+        
+        self.status_var.set(f"Downloading {filename}...")
+        
+        def do_download_and_open():
+            success = self.adb.pull_file(remote_path, local_path)
+            self.root.after(0, lambda: self._on_open_complete(success, filename, local_path))
+        
+        threading.Thread(target=do_download_and_open, daemon=True).start()
+    
+    def _on_open_complete(self, success: bool, filename: str, local_path: str):
+        """Handle download complete and open file."""
+        if success and os.path.exists(local_path):
+            self.status_var.set(f"Opening {filename}...")
+            try:
+                os.startfile(local_path)  # Windows: open with default app
+                self.status_var.set(f"Opened: {filename}")
+            except Exception as e:
+                self.status_var.set(f"Error opening: {e}")
+        else:
+            self.status_var.set(f"Failed to download: {filename}")
+            messagebox.showerror("Download Error", f"Failed to download {filename}")
+    
+    def _on_file_right_click(self, file: dict, x: int, y: int):
+        """Show context menu."""
+        self.context_menu.tk_popup(x, y)
+    
+    def _pull_file(self, file: dict):
+        """Pull a single file to PC."""
+        remote_path = file.get("path", "")
+        if not remote_path:
+            return
+        
+        # Ask for save location
+        default_name = file.get("name", "file")
+        local_path = filedialog.asksaveasfilename(
+            initialfile=default_name,
+            title="Save file to..."
+        )
+        
+        if not local_path:
+            return
+        
+        self.status_var.set(f"Downloading {default_name}...")
+        
+        def do_pull():
+            success = self.adb.pull_file(remote_path, local_path)
+            self.root.after(0, lambda: self._on_pull_complete(success, default_name))
+        
+        threading.Thread(target=do_pull, daemon=True).start()
+    
+    def _on_pull_complete(self, success: bool, filename: str):
+        """Handle pull completion."""
+        if success:
+            self.status_var.set(f"Downloaded: {filename}")
+        else:
+            self.status_var.set(f"Failed to download: {filename}")
+            messagebox.showerror("Download Error", f"Failed to download {filename}")
+    
+    def _pull_selected(self):
+        """Pull selected files to PC."""
+        files = self.file_list.get_selected_files()
+        if not files:
+            return
+        
+        if len(files) == 1:
+            self._pull_file(files[0])
+        else:
+            # Multiple files - ask for folder
+            folder = filedialog.askdirectory(title="Save files to folder...")
+            if not folder:
+                return
+            
+            self.status_var.set(f"Downloading {len(files)} files...")
+            
+            def do_pull_multiple():
+                for file in files:
+                    remote_path = file.get("path", "")
+                    name = file.get("name", "file")
+                    local_path = os.path.join(folder, name)
+                    self.adb.pull_file(remote_path, local_path)
+                
+                self.root.after(0, lambda: self.status_var.set(f"Downloaded {len(files)} files"))
+            
+            threading.Thread(target=do_pull_multiple, daemon=True).start()
+    
+    def _show_in_explorer(self):
+        """Download file and show in Windows Explorer."""
+        files = self.file_list.get_selected_files()
+        if not files:
+            return
+        
+        file = files[0]  # Show first selected file
+        remote_path = file.get("path", "")
+        filename = file.get("name", "file")
+        if not remote_path:
+            return
+        
+        # Download to temp folder
+        import tempfile
+        import subprocess
+        temp_dir = os.path.join(tempfile.gettempdir(), "android_everything")
+        os.makedirs(temp_dir, exist_ok=True)
+        local_path = os.path.join(temp_dir, filename)
+        
+        self.status_var.set(f"Downloading {filename}...")
+        
+        def do_download_and_show():
+            success = self.adb.pull_file(remote_path, local_path)
+            self.root.after(0, lambda: self._on_show_complete(success, filename, local_path))
+        
+        threading.Thread(target=do_download_and_show, daemon=True).start()
+    
+    def _on_show_complete(self, success: bool, filename: str, local_path: str):
+        """Handle download complete and show in Explorer."""
+        import subprocess
+        if success and os.path.exists(local_path):
+            self.status_var.set(f"Showing {filename} in Explorer...")
+            try:
+                # Open Explorer and select the file
+                subprocess.run(['explorer', '/select,', local_path])
+                self.status_var.set(f"Opened folder: {filename}")
+            except Exception as e:
+                self.status_var.set(f"Error opening Explorer: {e}")
+        else:
+            self.status_var.set(f"Failed to download: {filename}")
+            messagebox.showerror("Download Error", f"Failed to download {filename}")
+    
+    def _copy_path(self):
+        """Copy file path to clipboard."""
+        files = self.file_list.get_selected_files()
+        if files:
+            paths = "\n".join(f.get("path", "") for f in files)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(paths)
+            self.status_var.set("Path copied to clipboard")
+    
+    def _delete_selected(self):
+        """Delete selected files."""
+        files = self.file_list.get_selected_files()
+        if not files:
+            return
+        
+        confirm = messagebox.askyesno(
+            "Confirm Delete",
+            f"Delete {len(files)} file(s) from device?\n\nThis cannot be undone!"
+        )
+        
+        if not confirm:
+            return
+        
+        self.status_var.set(f"Deleting {len(files)} files...")
+        
+        def do_delete():
+            deleted = 0
+            deleted_paths = []
+            for file in files:
+                path = file.get("path", "")
+                if self.adb.delete_file(path):
+                    deleted += 1
+                    deleted_paths.append(path)
+            
+            self.root.after(0, lambda: self._on_delete_complete(deleted, len(files), deleted_paths))
+        
+        threading.Thread(target=do_delete, daemon=True).start()
+    
+    def _on_delete_complete(self, deleted: int, total: int, deleted_paths: list):
+        """Handle delete completion."""
+        self.status_var.set(f"Deleted {deleted}/{total} files")
+        
+        # Remove deleted files from database index
+        if deleted_paths and self._current_device:
+            from database import get_database
+            db = get_database()
+            db.delete_files(self._current_device, deleted_paths)
+            self.search_engine.clear_cache()
+        
+        if deleted < total:
+            messagebox.showwarning("Delete Warning", f"Some files could not be deleted ({total - deleted} failed)")
+        
+        # Refresh search
+        self._do_search()
+    
+    def run(self):
+        """Run the application."""
+        # Center window
+        self.root.update_idletasks()
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        x = (self.root.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.root.winfo_screenheight() // 2) - (height // 2)
+        self.root.geometry(f"+{x}+{y}")
+        
+        self.root.mainloop()

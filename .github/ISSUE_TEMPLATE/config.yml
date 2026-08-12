@@ -1,0 +1,6 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Private security report
+    url: https://github.com/luli395/android_everything/security/advisories/new
+    about: Report a potential vulnerability privately
+
