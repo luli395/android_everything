@@ -1,8 +1,21 @@
 # Android Everything
 
-Android Everything is a lightweight desktop file search tool for Android devices. It connects through Android Debug Bridge (ADB), builds a local SQLite/FTS5 index, and lets you find files on a connected phone from a responsive Tkinter interface.
+**Bring the Everything-style file-search experience on Windows to your Android device.**
 
-> The application is currently aimed at Windows desktop users and is under active development.
+Android Everything connects to an Android phone through Android Debug Bridge (ADB), builds a local SQLite/FTS5 index, and lets you search the device's files from a responsive Windows desktop interface. Index once, then type to find files quickly—similar to using [Everything](https://www.voidtools.com/) for local Windows files.
+
+> Android Everything is inspired by the fast, search-as-you-type workflow of Everything. It is an independent open-source project and is not affiliated with or endorsed by voidtools. The application is currently under active development.
+
+## Why Android Everything?
+
+Android file browsing from Windows often means opening folders one by one and waiting for the device connection. Android Everything instead provides a familiar desktop search workflow:
+
+1. Connect and select an Android device.
+2. Build a local metadata index with one click.
+3. Start typing to find files by name or path immediately.
+4. Filter and sort results, then pull, open, locate, copy the path, or delete selected files.
+
+The index stays on your PC, so repeated searches query the local database rather than walking the phone's storage every time.
 
 ## Documentation
 
@@ -13,8 +26,8 @@ Android Everything is a lightweight desktop file search tool for Android devices
 
 - Discover connected Android devices through ADB
 - Detect internal storage, SD cards, and common external-storage paths
-- Build a local index of file names, paths, sizes, and modification times
-- Search instantly with SQLite FTS5 and prefix matching
+- Build a reusable local index of file names, paths, sizes, and modification times
+- Get an Everything-style, search-as-you-type workflow with SQLite FTS5 prefix matching
 - Filter results by file extension and sort by column
 - Pull files to the computer, open them, or reveal them in Explorer
 - Copy Android paths and delete selected device files after confirmation
