@@ -6,6 +6,7 @@ Android Everything is a lightweight desktop file search tool for Android devices
 
 ## Documentation
 
+- [English User Guide](docs/USER_GUIDE.md)
 - [中文使用说明](docs/USER_GUIDE.zh-CN.md)
 
 ## Features

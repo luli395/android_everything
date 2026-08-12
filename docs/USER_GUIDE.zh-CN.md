@@ -2,6 +2,8 @@
 
 本文档介绍如何在 Windows 上安装、连接设备、建立文件索引，以及使用 Android Everything 搜索和管理 Android 设备中的文件。
 
+英文版本请参阅 [English User Guide](USER_GUIDE.md)。
+
 ## 1. 使用前准备
 
 ### 1.1 系统要求
