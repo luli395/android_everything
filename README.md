@@ -4,6 +4,10 @@ Android Everything is a lightweight desktop file search tool for Android devices
 
 > The application is currently aimed at Windows desktop users and is under active development.
 
+## Documentation
+
+- [中文使用说明](docs/USER_GUIDE.zh-CN.md)
+
 ## Features
 
 - Discover connected Android devices through ADB
@@ -76,6 +80,7 @@ android_everything/
 ├── database.py         # SQLite and FTS5 persistence
 ├── search_engine.py    # Search API and query cache
 ├── config.py           # Application defaults
+├── docs/               # User documentation
 └── ui/                 # Tkinter window, file list, and styling
 ```
 
@@ -96,4 +101,3 @@ Bug reports and focused pull requests are welcome. See [CONTRIBUTING.md](CONTRIB
 ## License
 
 Licensed under the [MIT License](LICENSE).
-
