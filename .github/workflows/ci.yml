@@ -20,4 +20,5 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Compile Python sources
         run: python -m compileall -q .
-
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v

@@ -12,13 +12,13 @@ Thank you for helping improve Android Everything.
 
 ## Before opening a pull request
 
-Run the syntax check:
+Run the syntax check and unit tests:
 
 ```powershell
 python -m compileall -q .
+python -m unittest discover -s tests -v
 ```
 
 If a change interacts with a real device, describe the Android version, connection type, and storage layout you tested. Avoid including device serials, private paths, screenshots with personal data, or a generated `files.db`.
 
 Keep pull requests focused and explain the user-visible behavior, testing performed, and any compatibility considerations.
-

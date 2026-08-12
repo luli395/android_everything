@@ -91,10 +91,11 @@ Android Everything processes device metadata locally. The generated index can in
 
 ## Development
 
-The current code uses only the Python standard library. A quick syntax check is:
+The current code uses only the Python standard library. Run the syntax check and unit tests with:
 
 ```powershell
 python -m compileall -q .
+python -m unittest discover -s tests -v
 ```
 
 Bug reports and focused pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).

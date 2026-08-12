@@ -3,7 +3,7 @@ SQLite database for file indexing with FTS5 full-text search.
 """
 import sqlite3
 import os
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 from datetime import datetime
 from contextlib import contextmanager
 
@@ -118,6 +118,88 @@ class Database:
                 (device_serial,)
             )
             conn.commit()
+
+    def replace_device_index(
+        self,
+        device_serial: str,
+        files: List[Tuple],
+        model: str = "",
+        batch_size: int = 5000,
+        progress_callback: Optional[Callable[[int, int], None]] = None
+    ) -> int:
+        """Atomically replace all indexed files for a device.
+
+        The existing files, FTS entries, and device metadata are preserved if
+        any part of the replacement raises. The progress callback may raise to
+        cancel the operation and trigger the same rollback.
+        """
+        if batch_size <= 0:
+            raise ValueError("batch_size must be greater than zero")
+
+        now = datetime.now().isoformat()
+        total = len(files)
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+
+                if progress_callback:
+                    progress_callback(0, total)
+
+                cursor.execute(
+                    "DELETE FROM files WHERE device_serial = ?",
+                    (device_serial,)
+                )
+
+                for start in range(0, total, batch_size):
+                    batch = files[start:start + batch_size]
+                    data = [
+                        (
+                            device_serial, name, path, size, modified,
+                            is_dir, extension, now
+                        )
+                        for name, path, size, modified, is_dir, extension in batch
+                    ]
+                    cursor.executemany('''
+                        INSERT INTO files
+                        (device_serial, name, path, size, modified, is_dir,
+                         extension, indexed_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(device_serial, path) DO UPDATE SET
+                            name = excluded.name,
+                            size = excluded.size,
+                            modified = excluded.modified,
+                            is_dir = excluded.is_dir,
+                            extension = excluded.extension,
+                            indexed_at = excluded.indexed_at
+                    ''', data)
+
+                    if progress_callback:
+                        progress_callback(start + len(batch), total)
+
+                cursor.execute(
+                    "SELECT COUNT(*) FROM files WHERE device_serial = ?",
+                    (device_serial,)
+                )
+                indexed_count = cursor.fetchone()[0]
+
+                cursor.execute('''
+                    INSERT OR REPLACE INTO devices
+                    (serial, model, last_indexed, file_count)
+                    VALUES (?, ?, ?, ?)
+                ''', (device_serial, model, now, indexed_count))
+
+                # This final callback also gives an empty replacement a
+                # cancellation point immediately before commit.
+                if progress_callback:
+                    progress_callback(total, total)
+
+                conn.commit()
+                return indexed_count
+            except BaseException:
+                conn.rollback()
+                raise
     
     def insert_files_batch(self, device_serial: str, files: List[Tuple]) -> int:
         """

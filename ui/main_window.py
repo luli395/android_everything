@@ -342,7 +342,8 @@ class MainWindow:
         
         if self.indexer.is_indexing:
             self.indexer.cancel()
-            self.index_btn.configure(text="📥 Index")
+            self.index_btn.configure(text="Stopping...", state="disabled")
+            self.status_var.set("Stopping indexing...")
             return
         
         self.index_btn.configure(text="⏹️ Stop")
@@ -354,11 +355,19 @@ class MainWindow:
         
         def on_complete(count: int):
             self.root.after(0, lambda: self._on_indexing_complete(count))
+
+        def on_error(error: Exception):
+            self.root.after(0, lambda: self._on_indexing_error(str(error)))
+
+        def on_cancelled():
+            self.root.after(0, self._on_indexing_cancelled)
         
         self.indexer.index_device(
             self._current_device,
             progress_callback=on_progress,
-            complete_callback=on_complete
+            complete_callback=on_complete,
+            error_callback=on_error,
+            cancelled_callback=on_cancelled,
         )
     
     def _update_progress(self, message: str, current: int, total: int):
@@ -368,7 +377,7 @@ class MainWindow:
     
     def _on_indexing_complete(self, count: int):
         """Handle indexing completion."""
-        self.index_btn.configure(text="📥 Index")
+        self.index_btn.configure(text="📥 Index", state="normal")
         self.progress.grid_remove()
         self.count_var.set(f"{count:,} files indexed")
         
@@ -380,6 +389,22 @@ class MainWindow:
         # Clear cache and refresh results
         self.search_engine.clear_cache()
         self._do_search()
+
+    def _on_indexing_error(self, error: str):
+        """Restore the UI after a failed indexing attempt."""
+        self.index_btn.configure(text="📥 Index", state="normal")
+        self.progress.grid_remove()
+        self.status_var.set(
+            f"Indexing failed: {error}. Previous index preserved."
+        )
+
+    def _on_indexing_cancelled(self):
+        """Restore the UI after a cancelled indexing attempt."""
+        self.index_btn.configure(text="📥 Index", state="normal")
+        self.progress.grid_remove()
+        self.status_var.set(
+            "Indexing cancelled. Previous index preserved."
+        )
     
     def _on_file_double_click(self, file: dict):
         """Handle double-click on a file - download and open."""
