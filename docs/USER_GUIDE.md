@@ -2,8 +2,6 @@
 
 This guide explains how to install Android Everything on Windows, connect an Android device, build a file index, and search and manage files on the device.
 
-For the Chinese version, see [中文使用说明](USER_GUIDE.zh-CN.md).
-
 ## 1. Before You Begin
 
 ### 1.1 System requirements

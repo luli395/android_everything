@@ -20,7 +20,6 @@ The index stays on your PC, so repeated searches query the local database rather
 ## Documentation
 
 - [English User Guide](docs/USER_GUIDE.md)
-- [中文使用说明](docs/USER_GUIDE.zh-CN.md)
 
 ## Features
 
