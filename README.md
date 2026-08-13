@@ -17,6 +17,24 @@ Android file browsing from Windows often means opening folders one by one and wa
 
 The index stays on your PC, so repeated searches query the local database rather than walking the phone's storage every time.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    Device[Android Device] -->|USB debugging| ADB[ADB]
+    ADB -->|file metadata| Scanner[Scanner / File Indexer]
+    Scanner -->|atomic index update| Database[(SQLite + FTS5)]
+    Database -->|fast local queries| Search[Search Engine]
+    Search -->|results| UI[Tkinter Windows UI]
+    UI -->|refresh, index, pull, delete| ADB
+```
+
+1. **ADB** discovers connected devices and performs Android file operations.
+2. **Scanner** reads file metadata and prepares a complete device index.
+3. **SQLite/FTS5** stores the index locally and provides prefix search.
+4. **Search Engine** queries and caches results for the selected device.
+5. **Tkinter UI** provides the Everything-style Windows search workflow.
+
 ## Documentation
 
 - [English User Guide](docs/USER_GUIDE.md)
