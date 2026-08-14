@@ -84,6 +84,17 @@ Common device states:
 
 ## 3. Download and Start the Application
 
+### 3.1 Windows executable
+
+1. Open the [latest GitHub release](https://github.com/luli395/android_everything/releases/latest).
+2. Download `AndroidEverything.exe` and the accompanying SHA-256 file.
+3. Ensure `adb version` works in PowerShell.
+4. Double-click `AndroidEverything.exe`.
+
+Python is not required for the Windows executable. Windows may display a SmartScreen notice because this early release is not code-signed; review the publisher and checksum before choosing to run it.
+
+### 3.2 Run from source
+
 ```powershell
 git clone https://github.com/luli395/android_everything.git
 cd android_everything
@@ -106,7 +117,7 @@ While indexing, the button changes to **Stop**. Click it to request cancellation
 
 Android Everything automatically checks internal storage, SD cards, and several common external-storage paths. The index records file metadata—file name, device path, size, and modification time—but does not copy all file contents to the computer.
 
-The generated index is stored as `files.db` in the project directory. Clicking **Index** again clears the old index for the selected device and performs a new scan.
+The generated index is stored as `%LOCALAPPDATA%\AndroidEverything\files.db`. Clicking **Index** again atomically replaces the old index for the selected device only after a complete scan succeeds.
 
 > Some Android system directories are protected by platform permissions. A standard ADB session can index only files accessible to the current user. Android Everything also skips paths such as `/Android/data` and `.thumbnails`.
 
@@ -178,15 +189,16 @@ This operation deletes the original files from the Android device, not just thei
 
 ## 7. Data and Privacy
 
-- `files.db` contains the device serial and indexed file names and paths. Treat it as private local data.
+- `%LOCALAPPDATA%\AndroidEverything\files.db` contains the device serial and indexed file names and paths. Treat it as private local data.
 - Files downloaded from the phone and files in the temporary directory are not uploaded to GitHub.
 - The project's `.gitignore` excludes `files.db`, `phone/`, `downloads/`, and Python caches. Check logs and screenshots for personal information before sharing them.
-- To remove the index, close the application and delete `files.db` from the project directory. An empty database will be created the next time the application starts.
+- To remove the index, close the application and delete `%LOCALAPPDATA%\AndroidEverything\files.db`. An empty database will be created the next time the application starts.
+- Startup diagnostics are written to `%LOCALAPPDATA%\AndroidEverything\android-everything.log`.
 - To remove files created by double-clicking or **Show in Explorer**, delete `%TEMP%\android_everything`.
 
 ## 8. Troubleshooting
 
-### “ADB was not found” appears
+### "ADB was not found" appears
 
 Make sure `adb version` works in the current PowerShell session, or set the executable path explicitly before starting the application:
 
@@ -195,7 +207,7 @@ $env:ANDROID_EVERYTHING_ADB = "C:\path\to\platform-tools\adb.exe"
 python main.py
 ```
 
-### The application displays “No devices found”
+### The application displays "No devices found"
 
 Check the following:
 

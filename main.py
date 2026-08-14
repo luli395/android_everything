@@ -14,31 +14,62 @@ Requirements:
     - USB debugging enabled on Android device
 """
 
-import sys
+import logging
 import os
+import sys
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ui.main_window import MainWindow
+from config import APP_DATA_DIR, LOG_PATH
+
+
+def configure_logging():
+    """Configure file logging for both source and windowed executable runs."""
+    os.makedirs(APP_DATA_DIR, exist_ok=True)
+    file_handler = logging.FileHandler(LOG_PATH, encoding="utf-8")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[file_handler],
+    )
+
+
+def show_startup_error(error: Exception):
+    """Display a startup error without depending on a console window."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "Android Everything",
+            f"Android Everything could not start.\n\n{error}\n\n"
+            f"Details were written to:\n{LOG_PATH}",
+            parent=root,
+        )
+        root.destroy()
+    except Exception:
+        # File logging remains available if Tk itself cannot initialize.
+        pass
 
 
 def main():
     """Application entry point."""
-    print("Starting Android Everything...")
-    print(f"Python version: {sys.version}")
-    print("-" * 40)
-    
+    configure_logging()
+    logging.info("Starting Android Everything with Python %s", sys.version)
+
     try:
         app = MainWindow()
         app.run()
-    except Exception as e:
-        print(f"Error starting application: {e}")
-        import traceback
-        traceback.print_exc()
-        input("Press Enter to exit...")
-        sys.exit(1)
+        return 0
+    except Exception as error:
+        logging.exception("Application startup failed")
+        show_startup_error(error)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

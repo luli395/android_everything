@@ -39,6 +39,12 @@ flowchart LR
 
 - [English User Guide](docs/USER_GUIDE.md)
 
+## Download for Windows
+
+Download `AndroidEverything.exe` from the [latest GitHub release](https://github.com/luli395/android_everything/releases/latest). The executable is a standalone Windows build, so Python is not required.
+
+ADB is not bundled. Install [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools), add its directory to `PATH`, then start `AndroidEverything.exe`. You can verify the download with the SHA-256 checksum file attached to the same release.
+
 ## Features
 
 - Discover connected Android devices through ADB
@@ -53,9 +59,10 @@ flowchart LR
 ## Requirements
 
 - Windows 10 or later
-- Python 3.8 or later (with Tkinter)
 - [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools)
 - An Android device with USB debugging enabled
+
+Running from source additionally requires Python 3.8 or later with Tkinter.
 
 ## Quick start
 
@@ -98,26 +105,28 @@ The defaults are defined in [`config.py`](config.py). The most useful runtime se
 | Environment variable | Purpose |
 | --- | --- |
 | `ANDROID_EVERYTHING_ADB` | Absolute path to the `adb` executable. If unset, the application searches `PATH`. |
+| `ANDROID_EVERYTHING_DATA_DIR` | Optional override for the directory that stores the index and application log. |
 
-The SQLite index is generated locally as `files.db`. Device content, exported files, database indexes, caches, and local environment files are intentionally excluded from version control.
+The SQLite index and application log are stored under `%LOCALAPPDATA%\AndroidEverything` by default. Device content, exported files, database indexes, caches, and local environment files are intentionally excluded from version control.
 
 ## Project structure
 
 ```text
 android_everything/
-├── main.py             # Application entry point
-├── adb_wrapper.py      # ADB discovery and file operations
-├── file_indexer.py     # Device scanner and indexing pipeline
-├── database.py         # SQLite and FTS5 persistence
-├── search_engine.py    # Search API and query cache
-├── config.py           # Application defaults
-├── docs/               # User documentation
-└── ui/                 # Tkinter window, file list, and styling
+|-- main.py             # Application entry point
+|-- adb_wrapper.py      # ADB discovery and file operations
+|-- file_indexer.py     # Device scanner and indexing pipeline
+|-- database.py         # SQLite and FTS5 persistence
+|-- search_engine.py    # Search API and query cache
+|-- config.py           # Application defaults
+|-- docs/               # User documentation
+|-- scripts/            # Windows build script
+`-- ui/                 # Tkinter window, file list, and styling
 ```
 
 ## Privacy
 
-Android Everything processes device metadata locally. The generated index can include device serials and file paths, so `files.db` must not be committed or shared. Files pulled from a phone should likewise remain outside the repository.
+Android Everything processes device metadata locally. The generated index can include device serials and file paths, so `%LOCALAPPDATA%\AndroidEverything\files.db` must not be shared. Files pulled from a phone should likewise remain outside the repository.
 
 ## Development
 

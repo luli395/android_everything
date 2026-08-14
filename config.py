@@ -4,6 +4,11 @@ Configuration for Android Everything app.
 import os
 import shutil
 
+from version import __version__
+
+APP_NAME = "AndroidEverything"
+DISPLAY_NAME = "Android Everything"
+
 # ADB Configuration
 ADB_PATH = os.environ.get("ANDROID_EVERYTHING_ADB") or shutil.which("adb") or "adb"
 
@@ -14,11 +19,30 @@ SCAN_PATHS = [
 ]
 
 # Database configuration
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE_PATH = os.path.join(APP_DIR, "files.db")
+def get_app_data_dir() -> str:
+    """Return the per-user directory used for persistent application data."""
+    override = os.environ.get("ANDROID_EVERYTHING_DATA_DIR")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+
+    if os.name == "nt":
+        base_dir = os.environ.get("LOCALAPPDATA")
+        if not base_dir:
+            base_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    else:
+        base_dir = os.environ.get("XDG_DATA_HOME")
+        if not base_dir:
+            base_dir = os.path.join(os.path.expanduser("~"), ".local", "share")
+
+    return os.path.join(base_dir, APP_NAME)
+
+
+APP_DATA_DIR = get_app_data_dir()
+DATABASE_PATH = os.path.join(APP_DATA_DIR, "files.db")
+LOG_PATH = os.path.join(APP_DATA_DIR, "android-everything.log")
 
 # UI Configuration
-WINDOW_TITLE = "Android Everything"
+WINDOW_TITLE = f"{DISPLAY_NAME} {__version__}"
 WINDOW_WIDTH = 1200
 WINDOW_HEIGHT = 800
 

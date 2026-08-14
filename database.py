@@ -19,6 +19,8 @@ class Database:
     
     def _init_db(self):
         """Initialize database schema."""
+        parent_dir = os.path.dirname(os.path.abspath(self.db_path))
+        os.makedirs(parent_dir, exist_ok=True)
         with self._get_connection() as conn:
             cursor = conn.cursor()
             

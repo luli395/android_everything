@@ -4,7 +4,7 @@ Main application window for Android Everything.
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
-from typing import Optional
+from typing import List, Optional
 import os
 
 from ui.styles import COLORS, FONTS, apply_dark_theme
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import WINDOW_TITLE, WINDOW_WIDTH, WINDOW_HEIGHT, SEARCH_DELAY_MS
 from adb_wrapper import get_adb, ADBWrapper, DeviceInfo, ADBError
-from file_indexer import get_indexer, FileIndexer
+from file_indexer import FileIndexer
 from search_engine import get_search_engine, SearchEngine
 
 
@@ -37,26 +37,44 @@ class MainWindow:
         # Apply theme
         apply_dark_theme(self.root)
         
-        # Initialize components
+        # Initialize local components even when ADB is not installed, so the
+        # packaged application can still open and explain how to configure it.
+        self.search_engine = get_search_engine()
+        self.adb: Optional[ADBWrapper] = None
+        self.indexer: Optional[FileIndexer] = None
+        self._adb_error: Optional[str] = None
         try:
             self.adb = get_adb()
+            self.indexer = FileIndexer(adb=self.adb, db=self.search_engine.db)
         except ADBError as e:
-            messagebox.showerror("ADB Error", str(e))
-            self.adb = None
-        
-        self.indexer = get_indexer()
-        self.search_engine = get_search_engine()
+            self._adb_error = str(e)
         
         # State
-        self._devices: list[DeviceInfo] = []
+        self._devices: List[DeviceInfo] = []
         self._current_device: Optional[str] = None
         self._search_timer: Optional[str] = None
         
         # Build UI
         self._setup_ui()
         
-        # Initial device check
-        self.root.after(100, self._refresh_devices)
+        # Initial device check, or a non-fatal setup notice if ADB is missing.
+        if self.adb:
+            self.root.after(100, self._refresh_devices)
+        else:
+            self.refresh_btn.configure(state="disabled")
+            self.index_btn.configure(state="disabled")
+            self.status_var.set("ADB not found. Install Android Platform Tools, then restart the app.")
+            self.root.after(100, self._show_adb_setup_notice)
+
+    def _show_adb_setup_notice(self):
+        """Explain missing ADB after the main window has initialized."""
+        messagebox.showwarning(
+            "ADB Setup Required",
+            f"{self._adb_error}\n\nThe application can remain open, but device "
+            "operations require ADB. Install Android Platform Tools and restart "
+            "Android Everything.",
+            parent=self.root,
+        )
     
     def _setup_ui(self):
         """Set up the main UI layout."""
@@ -336,6 +354,14 @@ class MainWindow:
     
     def _start_indexing(self):
         """Start indexing the current device."""
+        if not self.adb or not self.indexer:
+            messagebox.showwarning(
+                "ADB Setup Required",
+                "Install Android Platform Tools and restart Android Everything.",
+                parent=self.root,
+            )
+            return
+
         if not self._current_device:
             messagebox.showwarning("No Device", "Please connect and select a device first.")
             return
