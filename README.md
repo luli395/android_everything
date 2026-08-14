@@ -1,5 +1,9 @@
 # Android Everything
 
+[![Release](https://img.shields.io/github/v/release/luli395/android_everything)](https://github.com/luli395/android_everything/releases/latest)
+[![CI](https://github.com/luli395/android_everything/actions/workflows/ci.yml/badge.svg)](https://github.com/luli395/android_everything/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Bring the Everything-style file-search experience on Windows to your Android device.**
 
 Android Everything connects to an Android phone through Android Debug Bridge (ADB), builds a local SQLite/FTS5 index, and lets you search the device's files from a responsive Windows desktop interface. Index once, then type to find files quickly—similar to using [Everything](https://www.voidtools.com/) for local Windows files.
@@ -41,9 +45,23 @@ flowchart LR
 
 ## Download for Windows
 
-Download `AndroidEverything.exe` from the [latest GitHub release](https://github.com/luli395/android_everything/releases/latest). The executable is a standalone Windows build, so Python is not required.
+Current release: **v0.1.0**
 
-ADB is not bundled. Install [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools), add its directory to `PATH`, then start `AndroidEverything.exe`. You can verify the download with the SHA-256 checksum file attached to the same release.
+- [Download AndroidEverything.exe](https://github.com/luli395/android_everything/releases/download/v0.1.0/AndroidEverything.exe)
+- [Download the SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.0/AndroidEverything-v0.1.0-SHA256.txt)
+- [View release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.0)
+
+The executable is a standalone Windows build, so Python is not required. To verify it in PowerShell, place both downloaded files in the same directory and run:
+
+```powershell
+$expected = (Get-Content .\AndroidEverything-v0.1.0-SHA256.txt).Split()[0]
+$actual = (Get-FileHash .\AndroidEverything.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+$actual -eq $expected
+```
+
+The result should be `True`.
+
+ADB is not bundled. Install [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools), add its directory to `PATH`, then start `AndroidEverything.exe`.
 
 ## Features
 
@@ -65,6 +83,14 @@ ADB is not bundled. Install [Android SDK Platform Tools](https://developer.andro
 Running from source additionally requires Python 3.8 or later with Tkinter.
 
 ## Quick start
+
+### Windows executable
+
+1. Download `AndroidEverything.exe` from the [v0.1.0 release](https://github.com/luli395/android_everything/releases/tag/v0.1.0).
+2. Install Android SDK Platform Tools and ensure `adb version` works in PowerShell.
+3. Connect and authorize the Android device, then start `AndroidEverything.exe`.
+
+### Run from source
 
 1. Clone the repository:
 
@@ -136,6 +162,14 @@ The current code uses only the Python standard library. Run the syntax check and
 python -m compileall -q .
 python -m unittest discover -s tests -v
 ```
+
+Build the standalone Windows executable with PyInstaller by running:
+
+```powershell
+.\scripts\build_windows.ps1
+```
+
+The script creates `dist\AndroidEverything.exe` and its SHA-256 checksum file. Build artifacts are excluded from version control.
 
 Bug reports and focused pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 

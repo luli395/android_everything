@@ -7,14 +7,15 @@ This guide explains how to install Android Everything on Windows, connect an And
 ### 1.1 System requirements
 
 - Windows 10 or later
-- Python 3.8 or later with Tkinter
 - Android SDK Platform Tools, primarily `adb`
 - An Android device with USB debugging enabled
 - A USB cable that supports data transfer
 
-Android Everything currently uses only the Python standard library, so no `pip install` step is required.
+The Windows executable does not require Python. Running from source requires Python 3.8 or later with Tkinter; the application itself uses only the Python standard library, so no `pip install` step is required.
 
 ### 1.2 Install Python
+
+Skip this section when using `AndroidEverything.exe`.
 
 Download and install Python from the [official Python website](https://www.python.org/downloads/windows/). Selecting **Add Python to PATH** during installation is recommended.
 
@@ -86,12 +87,26 @@ Common device states:
 
 ### 3.1 Windows executable
 
-1. Open the [latest GitHub release](https://github.com/luli395/android_everything/releases/latest).
-2. Download `AndroidEverything.exe` and the accompanying SHA-256 file.
+1. Open the [v0.1.0 release](https://github.com/luli395/android_everything/releases/tag/v0.1.0).
+2. Download [AndroidEverything.exe](https://github.com/luli395/android_everything/releases/download/v0.1.0/AndroidEverything.exe) and [AndroidEverything-v0.1.0-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.0/AndroidEverything-v0.1.0-SHA256.txt).
 3. Ensure `adb version` works in PowerShell.
 4. Double-click `AndroidEverything.exe`.
 
 Python is not required for the Windows executable. Windows may display a SmartScreen notice because this early release is not code-signed; review the publisher and checksum before choosing to run it.
+
+To verify the downloaded executable, open PowerShell in its directory and run:
+
+```powershell
+$expected = (Get-Content .\AndroidEverything-v0.1.0-SHA256.txt).Split()[0]
+$actual = (Get-FileHash .\AndroidEverything.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+$actual -eq $expected
+```
+
+Continue when the command returns `True`. The expected SHA-256 value for v0.1.0 is:
+
+```text
+1fd96efda302b272a8cb2b676e6ab4b9e198e79d5e76761ef6aeaf00ba3b1982
+```
 
 ### 3.2 Run from source
 
