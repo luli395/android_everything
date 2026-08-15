@@ -1,0 +1,58 @@
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from database import Database, build_fts_prefix_query
+
+
+FILES = [
+    ("budget (final).xlsx", "/docs/budget (final).xlsx", 10, None, 0, ".xlsx"),
+    ('report "draft".txt', '/docs/report "draft".txt', 20, None, 0, ".txt"),
+    ("notes-or-tasks.md", "/docs/notes-or-tasks.md", 30, None, 0, ".md"),
+    ("OR roadmap.txt", "/docs/OR roadmap.txt", 40, None, 0, ".txt"),
+    ("report AND review.txt", "/docs/report AND review.txt", 50, None, 0, ".txt"),
+    ("literal [brackets].txt", "/docs/literal [brackets].txt", 60, None, 0, ".txt"),
+]
+
+
+class SpecialCharacterSearchTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        db_path = str(Path(self.temp_dir.name) / "files.db")
+        self.db = Database(db_path)
+        self.db.replace_device_index("device-1", FILES, model="Test Phone")
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def search_names(self, query):
+        return {row["name"] for row in self.db.search("device-1", query)}
+
+    def test_fts_operators_and_punctuation_are_treated_as_text(self):
+        cases = [
+            ("budget (", "budget (final).xlsx"),
+            ('"draft"', 'report "draft".txt'),
+            ("notes-or", "notes-or-tasks.md"),
+            ("OR", "OR roadmap.txt"),
+            ("report AND", "report AND review.txt"),
+            ("[brackets]", "literal [brackets].txt"),
+        ]
+
+        for query, expected_name in cases:
+            with self.subTest(query=query):
+                self.assertIn(expected_name, self.search_names(query))
+
+    def test_punctuation_only_queries_return_no_results(self):
+        for query in ["-", "*", "()", '"""', "___", "[{}]"]:
+            with self.subTest(query=query):
+                self.assertEqual(self.db.search("device-1", query), [])
+
+    def test_query_builder_quotes_every_prefix_token(self):
+        self.assertEqual(
+            build_fts_prefix_query('report AND "draft"'),
+            '"report"* AND "AND"* AND "draft"*',
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

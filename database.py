@@ -3,11 +3,28 @@ SQLite database for file indexing with FTS5 full-text search.
 """
 import sqlite3
 import os
+import re
 from typing import Callable, List, Optional, Tuple
 from datetime import datetime
 from contextlib import contextmanager
 
 from config import DATABASE_PATH
+
+
+def build_fts_prefix_query(query: str) -> Optional[str]:
+    """Convert user text into a safe FTS5 prefix query.
+
+    FTS5 punctuation and operators such as quotes, parentheses, ``AND``, and
+    ``OR`` must not be interpreted as query syntax. Extracting Unicode word
+    tokens and quoting each token preserves the existing all-terms prefix
+    search behavior while preventing malformed MATCH expressions.
+    """
+    tokens = re.findall(r"[^\W_]+", query, flags=re.UNICODE)
+    if not tokens:
+        return None
+
+    escaped_tokens = [token.replace('"', '""') for token in tokens]
+    return " AND ".join(f'"{token}"*' for token in escaped_tokens)
 
 
 class Database:
@@ -265,6 +282,15 @@ class Database:
         Returns:
             List of file dictionaries
         """
+        query = query.strip()
+        fts_query = build_fts_prefix_query(query) if query else None
+
+        # Punctuation-only input has no searchable FTS5 tokens. Return an
+        # empty result rather than passing invalid syntax to MATCH or treating
+        # the input as an empty query that displays every indexed file.
+        if query and not fts_query:
+            return []
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
@@ -287,9 +313,6 @@ class Database:
                 cursor.execute(sql, params)
             else:
                 # Use FTS5 for search
-                # Add wildcards for prefix matching
-                fts_query = ' '.join(f'{word}*' for word in query.split())
-                
                 sql = '''
                     SELECT f.id, f.name, f.path, f.size, f.modified, f.is_dir, f.extension
                     FROM files f
