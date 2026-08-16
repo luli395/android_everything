@@ -5,7 +5,7 @@ import subprocess
 import os
 import re
 import shutil
-from typing import List, Optional, Tuple, Callable
+from typing import List, Optional, Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -50,16 +50,22 @@ class ADBWrapper:
                 "to PATH, or set ANDROID_EVERYTHING_ADB to the adb executable."
             )
     
-    def _run_command(self, args: List[str], timeout: int = 30) -> Tuple[str, str]:
+    def _run_command(
+        self,
+        args: List[str],
+        timeout: int = 30,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess:
         """
-        Run an ADB command and return stdout and stderr.
+        Run an ADB command and return its completed process information.
         
         Args:
             args: Command arguments (without 'adb' prefix)
             timeout: Command timeout in seconds
+            check: Raise ADBError when ADB returns a non-zero exit code
             
         Returns:
-            Tuple of (stdout, stderr)
+            Completed process containing stdout, stderr, and return code
         """
         cmd = [self.adb_path] + args
         
@@ -72,11 +78,25 @@ class ADBWrapper:
                 encoding='utf-8',
                 errors='replace'
             )
-            return result.stdout, result.stderr
-        except subprocess.TimeoutExpired:
-            raise ADBError(f"Command timed out: {' '.join(args)}")
-        except Exception as e:
-            raise ADBError(f"Command failed: {e}")
+        except subprocess.TimeoutExpired as error:
+            raise ADBError(
+                f"ADB command timed out after {timeout} seconds: "
+                f"{' '.join(args)}"
+            ) from error
+        except Exception as error:
+            raise ADBError(f"Could not run ADB command: {error}") from error
+
+        if check and result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            if len(detail) > 500:
+                detail = detail[:497] + "..."
+
+            message = f"ADB command failed with exit code {result.returncode}"
+            if detail:
+                message += f": {detail}"
+            raise ADBError(message)
+
+        return result
     
     def _device_args(self) -> List[str]:
         """Get device-specific arguments if a device is selected."""
@@ -91,7 +111,8 @@ class ADBWrapper:
         Returns:
             List of DeviceInfo objects
         """
-        stdout, stderr = self._run_command(["devices", "-l"])
+        result = self._run_command(["devices", "-l"])
+        stdout = result.stdout
         
         devices = []
         for line in stdout.strip().split('\n')[1:]:  # Skip header
@@ -137,8 +158,8 @@ class ADBWrapper:
             Command output
         """
         args = self._device_args() + ["shell", command]
-        stdout, stderr = self._run_command(args, timeout=timeout)
-        return stdout
+        result = self._run_command(args, timeout=timeout)
+        return result.stdout
     
     def list_files_fast(self, path: str, progress_callback: Optional[Callable[[int], None]] = None) -> List[FileInfo]:
         """
@@ -155,10 +176,7 @@ class ADBWrapper:
         # Format: type|size|mtime|path
         cmd = f'find "{path}" -type f 2>/dev/null | head -100000'
         
-        try:
-            output = self.shell(cmd, timeout=120)
-        except ADBError:
-            return []
+        output = self.shell(cmd, timeout=120)
         
         files = []
         lines = output.strip().split('\n')
@@ -253,9 +271,12 @@ class ADBWrapper:
             True if successful
         """
         args = self._device_args() + ["pull", remote_path, local_path]
-        stdout, stderr = self._run_command(args, timeout=300)
-        
-        return "error" not in stderr.lower()
+        try:
+            result = self._run_command(args, timeout=300, check=False)
+        except ADBError:
+            return False
+
+        return result.returncode == 0
     
     def delete_file(self, remote_path: str) -> bool:
         """
@@ -267,8 +288,11 @@ class ADBWrapper:
         Returns:
             True if successful
         """
-        output = self.shell(f'rm -f "{remote_path}" 2>&1')
-        return "error" not in output.lower() and "denied" not in output.lower()
+        try:
+            self.shell(f'rm -f "{remote_path}" 2>&1')
+            return True
+        except ADBError:
+            return False
     
     def get_storage_info(self) -> dict:
         """
@@ -314,7 +338,7 @@ class ADBWrapper:
                     continue
                 if line.startswith('/storage/'):
                     paths.add(line)
-        except:
+        except ADBError:
             pass
         
         # Check /mnt/media_rw (SD cards on some devices)
@@ -324,7 +348,7 @@ class ADBWrapper:
                 line = line.strip().rstrip('/')
                 if line and line.startswith('/mnt/'):
                     paths.add(line)
-        except:
+        except ADBError:
             pass
         
         # Check /mnt/sdcard (legacy)
@@ -332,7 +356,7 @@ class ADBWrapper:
             output = self.shell("ls -d /mnt/sdcard 2>/dev/null")
             if output.strip() and 'No such file' not in output:
                 paths.add("/mnt/sdcard")
-        except:
+        except ADBError:
             pass
         
         # Check /mnt/extSdCard (Samsung legacy)
@@ -340,7 +364,7 @@ class ADBWrapper:
             output = self.shell("ls -d /mnt/extSdCard 2>/dev/null")
             if output.strip() and 'No such file' not in output:
                 paths.add("/mnt/extSdCard")
-        except:
+        except ADBError:
             pass
         
         # Check /mnt/usb_storage (USB OTG)
@@ -350,7 +374,7 @@ class ADBWrapper:
                 line = line.strip().rstrip('/')
                 if line and line.startswith('/mnt/usb'):
                     paths.add(line)
-        except:
+        except ADBError:
             pass
         
         # Check /data/media/0 (internal on some devices, may need root)
@@ -358,7 +382,7 @@ class ADBWrapper:
             output = self.shell("ls -d /data/media/0 2>/dev/null")
             if output.strip() and 'Permission denied' not in output and 'No such file' not in output:
                 paths.add("/data/media/0")
-        except:
+        except ADBError:
             pass
         
         # Check environment variable for external storage
@@ -367,7 +391,7 @@ class ADBWrapper:
             ext = output.strip()
             if ext and ext.startswith('/'):
                 paths.add(ext)
-        except:
+        except ADBError:
             pass
         
         # Check secondary storage environment variable
@@ -378,7 +402,7 @@ class ADBWrapper:
                 for p in sec.split(':'):
                     if p:
                         paths.add(p)
-        except:
+        except ADBError:
             pass
         
         return list(paths)
