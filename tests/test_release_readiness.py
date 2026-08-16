@@ -10,8 +10,8 @@ from version import __version__
 
 
 class ReleaseReadinessTests(unittest.TestCase):
-    def test_version_matches_first_release(self):
-        self.assertEqual(__version__, "0.1.0")
+    def test_version_matches_current_release(self):
+        self.assertEqual(__version__, "0.1.1")
 
     def test_windows_data_directory_uses_local_app_data(self):
         with patch.object(config.os, "name", "nt"), patch.dict(

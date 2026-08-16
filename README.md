@@ -45,16 +45,16 @@ flowchart LR
 
 ## Download for Windows
 
-Current release: **v0.1.0**
+Current release: **v0.1.1**
 
-- [Download AndroidEverything.exe](https://github.com/luli395/android_everything/releases/download/v0.1.0/AndroidEverything.exe)
-- [Download the SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.0/AndroidEverything-v0.1.0-SHA256.txt)
-- [View release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.0)
+- [Download AndroidEverything.exe](https://github.com/luli395/android_everything/releases/download/v0.1.1/AndroidEverything.exe)
+- [Download the SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.1/AndroidEverything-v0.1.1-SHA256.txt)
+- [View release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.1)
 
 The executable is a standalone Windows build, so Python is not required. To verify it in PowerShell, place both downloaded files in the same directory and run:
 
 ```powershell
-$expected = (Get-Content .\AndroidEverything-v0.1.0-SHA256.txt).Split()[0]
+$expected = (Get-Content .\AndroidEverything-v0.1.1-SHA256.txt).Split()[0]
 $actual = (Get-FileHash .\AndroidEverything.exe -Algorithm SHA256).Hash.ToLowerInvariant()
 $actual -eq $expected
 ```
@@ -86,7 +86,7 @@ Running from source additionally requires Python 3.8 or later with Tkinter.
 
 ### Windows executable
 
-1. Download `AndroidEverything.exe` from the [v0.1.0 release](https://github.com/luli395/android_everything/releases/tag/v0.1.0).
+1. Download `AndroidEverything.exe` from the [v0.1.1 release](https://github.com/luli395/android_everything/releases/tag/v0.1.1).
 2. Install Android SDK Platform Tools and ensure `adb version` works in PowerShell.
 3. Connect and authorize the Android device, then start `AndroidEverything.exe`.
 

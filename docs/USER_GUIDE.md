@@ -87,8 +87,8 @@ Common device states:
 
 ### 3.1 Windows executable
 
-1. Open the [v0.1.0 release](https://github.com/luli395/android_everything/releases/tag/v0.1.0).
-2. Download [AndroidEverything.exe](https://github.com/luli395/android_everything/releases/download/v0.1.0/AndroidEverything.exe) and [AndroidEverything-v0.1.0-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.0/AndroidEverything-v0.1.0-SHA256.txt).
+1. Open the [v0.1.1 release](https://github.com/luli395/android_everything/releases/tag/v0.1.1).
+2. Download [AndroidEverything.exe](https://github.com/luli395/android_everything/releases/download/v0.1.1/AndroidEverything.exe) and [AndroidEverything-v0.1.1-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.1/AndroidEverything-v0.1.1-SHA256.txt).
 3. Ensure `adb version` works in PowerShell.
 4. Double-click `AndroidEverything.exe`.
 
@@ -97,15 +97,15 @@ Python is not required for the Windows executable. Windows may display a SmartSc
 To verify the downloaded executable, open PowerShell in its directory and run:
 
 ```powershell
-$expected = (Get-Content .\AndroidEverything-v0.1.0-SHA256.txt).Split()[0]
+$expected = (Get-Content .\AndroidEverything-v0.1.1-SHA256.txt).Split()[0]
 $actual = (Get-FileHash .\AndroidEverything.exe -Algorithm SHA256).Hash.ToLowerInvariant()
 $actual -eq $expected
 ```
 
-Continue when the command returns `True`. The expected SHA-256 value for v0.1.0 is:
+Continue when the command returns `True`. The expected SHA-256 value for v0.1.1 is:
 
 ```text
-1fd96efda302b272a8cb2b676e6ab4b9e198e79d5e76761ef6aeaf00ba3b1982
+44365610274edcab31d383a8285bf7dfcfcca2a7b38dfd8db79907d617f4598d
 ```
 
 ### 3.2 Run from source

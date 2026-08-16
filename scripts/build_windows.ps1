@@ -11,7 +11,7 @@ $VenvDir = Join-Path $ProjectRoot ".venv"
 $Python = Join-Path $VenvDir "Scripts\python.exe"
 $DistDir = Join-Path $ProjectRoot "dist"
 $ExePath = Join-Path $DistDir "AndroidEverything.exe"
-$ChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.0-SHA256.txt"
+$ChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.1-SHA256.txt"
 $VersionFile = Join-Path $ProjectRoot "packaging\windows-version-info.txt"
 
 Push-Location $ProjectRoot
