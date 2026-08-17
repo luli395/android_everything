@@ -3,6 +3,7 @@ Main application window for Android Everything.
 """
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import logging
 import threading
 from typing import List, Optional
 import os
@@ -17,6 +18,10 @@ from config import WINDOW_TITLE, WINDOW_WIDTH, WINDOW_HEIGHT, SEARCH_DELAY_MS
 from adb_wrapper import get_adb, ADBWrapper, DeviceInfo, ADBError
 from file_indexer import FileIndexer
 from search_engine import get_search_engine, SearchEngine
+from database import SearchQueryError
+
+
+logger = logging.getLogger(__name__)
 
 
 class MainWindow:
@@ -289,16 +294,25 @@ class MainWindow:
         if self.ext_var.get() != "All":
             ext_filter = "." + self.ext_var.get().lower()
         
-        # Search
-        results = self.search_engine.search(
-            self._current_device,
-            query,
-            extension_filter=ext_filter
-        )
+        # Search. Keep malformed/corrupt database queries from escaping the
+        # Tkinter event callback and terminating the UI.
+        try:
+            results = self.search_engine.search(
+                self._current_device,
+                query,
+                extension_filter=ext_filter
+            )
+        except SearchQueryError as error:
+            logger.exception("Search query failed")
+            self.file_list.clear()
+            self.count_var.set("Search unavailable")
+            self.status_var.set(str(error))
+            return
         
         # Update file list
         self.file_list.set_files(results)
         self.count_var.set(f"{len(results):,} files")
+        self.status_var.set("Ready")
     
     def _refresh_devices(self):
         """Refresh the list of connected devices."""

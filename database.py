@@ -11,6 +11,10 @@ from contextlib import contextmanager
 from config import DATABASE_PATH
 
 
+class SearchQueryError(RuntimeError):
+    """Raised when SQLite cannot complete a file search."""
+
+
 def build_fts_prefix_query(query: str) -> Optional[str]:
     """Convert user text into a safe FTS5 prefix query.
 
@@ -264,6 +268,27 @@ class Database:
             conn.commit()
     
     def search(
+        self,
+        device_serial: str,
+        query: str,
+        limit: int = 1000,
+        extension_filter: Optional[str] = None
+    ) -> List[dict]:
+        """Search indexed files and expose a stable application error."""
+        try:
+            return self._search(
+                device_serial,
+                query,
+                limit=limit,
+                extension_filter=extension_filter,
+            )
+        except sqlite3.OperationalError as error:
+            raise SearchQueryError(
+                "Search could not be completed. Try rebuilding the index "
+                "or using a simpler query."
+            ) from error
+
+    def _search(
         self, 
         device_serial: str, 
         query: str, 
@@ -310,7 +335,6 @@ class Database:
                 sql += " ORDER BY name LIMIT ?"
                 params.append(limit)
                 
-                cursor.execute(sql, params)
             else:
                 # Use FTS5 for search
                 sql = '''
@@ -328,8 +352,8 @@ class Database:
                 
                 sql += " ORDER BY rank LIMIT ?"
                 params.append(limit)
-                
-                cursor.execute(sql, params)
+
+            cursor.execute(sql, params)
             
             results = []
             for row in cursor.fetchall():
