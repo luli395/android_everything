@@ -2,17 +2,21 @@
 File indexer for scanning and indexing Android device files.
 """
 import os
+import shlex
 import threading
 from typing import Callable, Optional, List
 from datetime import datetime
 
-from adb_wrapper import ADBWrapper, FileInfo, get_adb
+from adb_wrapper import ADBError, ADBWrapper, FileInfo, get_adb
 from database import Database, get_database
 from config import SCAN_PATHS
 
 
 class IndexingCancelled(Exception):
     """Raised internally to roll back a cancelled index replacement."""
+
+
+SCAN_COMPLETE_MARKER = "__ANDROID_EVERYTHING_SCAN_COMPLETE__="
 
 
 class FileIndexer:
@@ -203,10 +207,43 @@ class FileIndexer:
         """Scan a single path on the device with file sizes using ls -lR (fast)."""
         files = []
         
-        # Use ls -lR for fast recursive listing with sizes. Let failures reach
-        # the worker so it can report them and preserve the previous index.
-        cmd = f'ls -lR "{path}" 2>/dev/null'
+        # Recursive ls commonly returns 1 when Android denies access to a
+        # protected child directory even though the accessible listing is
+        # complete and usable. Verify the root first, tolerate that partial
+        # status, and emit a sentinel so an interrupted ADB transport can never
+        # be mistaken for a completed scan.
+        quoted_path = shlex.quote(path)
+        cmd = (
+            f"if ! ls -ld {quoted_path} >/dev/null 2>&1; then exit 2; fi; "
+            f"ls -lR {quoted_path} 2>/dev/null; "
+            "scan_status=$?; "
+            f"printf '\n{SCAN_COMPLETE_MARKER}%s\n' \"$scan_status\"; "
+            "exit 0"
+        )
         output = self.adb.shell(cmd, timeout=180)
+
+        listing, marker, status_output = output.rpartition(SCAN_COMPLETE_MARKER)
+        if not marker:
+            raise ADBError(
+                "ADB scan ended before the completion marker was received"
+            )
+
+        try:
+            scan_status = int(status_output.splitlines()[0].strip())
+        except (IndexError, ValueError) as error:
+            raise ADBError("ADB scan returned an invalid completion status") from error
+
+        if scan_status not in (0, 1):
+            raise ADBError(
+                f"Android file listing failed with exit code {scan_status}"
+            )
+
+        # Status 1 represents inaccessible child directories on common Android
+        # builds. An empty response with that status is not a usable scan.
+        if scan_status == 1 and not listing.strip():
+            raise ADBError("Android file listing failed without returning data")
+
+        output = listing.rstrip("\r\n")
 
         current_dir = path
         lines = output.split('\n')

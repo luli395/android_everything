@@ -4,9 +4,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from adb_wrapper import DeviceInfo
+from adb_wrapper import ADBError, DeviceInfo
 from database import Database
-from file_indexer import FileIndexer, IndexingCancelled
+from file_indexer import FileIndexer, IndexingCancelled, SCAN_COMPLETE_MARKER
 
 
 OLD_FILES = [
@@ -15,9 +15,17 @@ OLD_FILES = [
 
 
 class FakeADB:
-    def __init__(self, output="", error=None):
+    def __init__(
+        self,
+        output="",
+        error=None,
+        scan_status=0,
+        include_scan_marker=True,
+    ):
         self.output = output
         self.error = error
+        self.scan_status = scan_status
+        self.include_scan_marker = include_scan_marker
         self.selected_device = None
 
     def select_device(self, serial):
@@ -29,6 +37,10 @@ class FakeADB:
     def shell(self, command, timeout=60):
         if self.error:
             raise self.error
+        if self.include_scan_marker:
+            return (
+                f"{self.output}\n{SCAN_COMPLETE_MARKER}{self.scan_status}\n"
+            )
         return self.output
 
     def get_devices(self):
@@ -91,6 +103,35 @@ class AtomicIndexingTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(RuntimeError, "scan failed"):
+            self.indexer.index_device_sync("device-1")
+
+        self.assert_old_index_preserved()
+
+    def test_inaccessible_child_directories_do_not_discard_valid_results(self):
+        output = "\n".join([
+            "/storage/emulated/0:",
+            "-rw-rw---- 1 user group 10 2026-08-12 10:00 visible.txt",
+        ])
+        self.indexer = FileIndexer(
+            FakeADB(output=output, scan_status=1),
+            self.db,
+        )
+
+        count = self.indexer.index_device_sync("device-1")
+
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            [row["path"] for row in self.db.search("device-1", "visible")],
+            ["/storage/emulated/0/visible.txt"],
+        )
+
+    def test_missing_scan_completion_marker_preserves_previous_index(self):
+        self.indexer = FileIndexer(
+            FakeADB(output="partial output", include_scan_marker=False),
+            self.db,
+        )
+
+        with self.assertRaisesRegex(ADBError, "completion marker"):
             self.indexer.index_device_sync("device-1")
 
         self.assert_old_index_preserved()
