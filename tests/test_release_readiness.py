@@ -11,7 +11,39 @@ from version import __version__
 
 class ReleaseReadinessTests(unittest.TestCase):
     def test_version_matches_current_release(self):
-        self.assertEqual(__version__, "0.1.1")
+        self.assertEqual(__version__, "0.1.2")
+
+    def test_packaged_adb_next_to_executable_is_detected(self):
+        with TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {},
+            clear=False,
+        ):
+            os.environ.pop("ANDROID_EVERYTHING_ADB", None)
+            adb_path = Path(temp_dir) / "adb.exe"
+            adb_path.write_bytes(b"test adb")
+
+            self.assertEqual(
+                config.find_adb_path(runtime_dir=temp_dir),
+                str(adb_path),
+            )
+
+    def test_packaged_platform_tools_subdirectory_is_detected(self):
+        with TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {},
+            clear=False,
+        ):
+            os.environ.pop("ANDROID_EVERYTHING_ADB", None)
+            platform_tools = Path(temp_dir) / "platform-tools"
+            platform_tools.mkdir()
+            adb_path = platform_tools / "adb.exe"
+            adb_path.write_bytes(b"test adb")
+
+            self.assertEqual(
+                config.find_adb_path(runtime_dir=temp_dir),
+                str(adb_path),
+            )
 
     def test_windows_data_directory_uses_local_app_data(self):
         with patch.object(config.os, "name", "nt"), patch.dict(

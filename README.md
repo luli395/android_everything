@@ -45,23 +45,25 @@ flowchart LR
 
 ## Download for Windows
 
-Current release: **v0.1.1**
+Current release: **v0.1.2**
 
-- [Download AndroidEverything.exe](https://github.com/luli395/android_everything/releases/download/v0.1.1/AndroidEverything.exe)
-- [Download the SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.1/AndroidEverything-v0.1.1-SHA256.txt)
-- [View release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.1)
+- [Download the complete Windows ZIP](https://github.com/luli395/android_everything/releases/download/v0.1.2/AndroidEverything-v0.1.2-windows.zip)
+- [Download the ZIP SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.2/AndroidEverything-v0.1.2-windows-SHA256.txt)
+- [View release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.2)
 
-The executable is a standalone Windows build, so Python is not required. To verify it in PowerShell, place both downloaded files in the same directory and run:
+The ZIP includes `AndroidEverything.exe`, ADB, the required ADB DLLs, and the Android Platform Tools notice. Python and a separate ADB installation are not required. Extract the complete ZIP before running the application.
+
+To verify the package in PowerShell, place the ZIP and checksum file in the same directory and run:
 
 ```powershell
-$expected = (Get-Content .\AndroidEverything-v0.1.1-SHA256.txt).Split()[0]
-$actual = (Get-FileHash .\AndroidEverything.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\AndroidEverything-v0.1.2-windows-SHA256.txt).Split()[0]
+$actual = (Get-FileHash .\AndroidEverything-v0.1.2-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
 $actual -eq $expected
 ```
 
 The result should be `True`.
 
-ADB is not bundled. Install [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools), add its directory to `PATH`, then start `AndroidEverything.exe`.
+The bundled ADB comes from [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools). Keep `adb.exe`, `AdbWinApi.dll`, and `AdbWinUsbApi.dll` beside `AndroidEverything.exe` after extraction.
 
 ## Features
 
@@ -77,17 +79,16 @@ ADB is not bundled. Install [Android SDK Platform Tools](https://developer.andro
 ## Requirements
 
 - Windows 10 or later
-- [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools)
 - An Android device with USB debugging enabled
 
-Running from source additionally requires Python 3.8 or later with Tkinter.
+Running from source additionally requires Python 3.8 or later with Tkinter and [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools).
 
 ## Quick start
 
 ### Windows executable
 
-1. Download `AndroidEverything.exe` from the [v0.1.1 release](https://github.com/luli395/android_everything/releases/tag/v0.1.1).
-2. Install Android SDK Platform Tools and ensure `adb version` works in PowerShell.
+1. Download the complete ZIP from the [v0.1.2 release](https://github.com/luli395/android_everything/releases/tag/v0.1.2).
+2. Extract every file to the same directory.
 3. Connect and authorize the Android device, then start `AndroidEverything.exe`.
 
 ### Run from source
@@ -163,13 +164,13 @@ python -m compileall -q .
 python -m unittest discover -s tests -v
 ```
 
-Build the standalone Windows executable with PyInstaller by running:
+Build the standalone Windows executable and ZIP package with PyInstaller by running:
 
 ```powershell
-.\scripts\build_windows.ps1
+.\scripts\build_windows.ps1 -AdbPath "C:\path\to\platform-tools\adb.exe"
 ```
 
-The script creates `dist\AndroidEverything.exe` and its SHA-256 checksum file. Build artifacts are excluded from version control.
+The script creates `dist\AndroidEverything.exe`, a complete Windows ZIP, and SHA-256 checksum files. Build artifacts are excluded from version control.
 
 Bug reports and focused pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 

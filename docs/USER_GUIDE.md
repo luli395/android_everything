@@ -7,11 +7,10 @@ This guide explains how to install Android Everything on Windows, connect an And
 ### 1.1 System requirements
 
 - Windows 10 or later
-- Android SDK Platform Tools, primarily `adb`
 - An Android device with USB debugging enabled
 - A USB cable that supports data transfer
 
-The Windows executable does not require Python. Running from source requires Python 3.8 or later with Tkinter; the application itself uses only the Python standard library, so no `pip install` step is required.
+The complete Windows ZIP includes ADB and does not require Python. Running from source requires Python 3.8 or later with Tkinter and Android SDK Platform Tools; the application itself uses only the Python standard library, so no `pip install` step is required.
 
 ### 1.2 Install Python
 
@@ -29,6 +28,8 @@ python -c "import tkinter; print('Tkinter OK')"
 Continue when both commands complete successfully.
 
 ### 1.3 Install ADB
+
+Skip this section when using the complete Windows ZIP. Keep `adb.exe`, `AdbWinApi.dll`, and `AdbWinUsbApi.dll` beside `AndroidEverything.exe`.
 
 Download the Windows package from [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools) and extract it.
 
@@ -87,9 +88,9 @@ Common device states:
 
 ### 3.1 Windows executable
 
-1. Open the [v0.1.1 release](https://github.com/luli395/android_everything/releases/tag/v0.1.1).
-2. Download [AndroidEverything.exe](https://github.com/luli395/android_everything/releases/download/v0.1.1/AndroidEverything.exe) and [AndroidEverything-v0.1.1-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.1/AndroidEverything-v0.1.1-SHA256.txt).
-3. Ensure `adb version` works in PowerShell.
+1. Open the [v0.1.2 release](https://github.com/luli395/android_everything/releases/tag/v0.1.2).
+2. Download [AndroidEverything-v0.1.2-windows.zip](https://github.com/luli395/android_everything/releases/download/v0.1.2/AndroidEverything-v0.1.2-windows.zip) and [AndroidEverything-v0.1.2-windows-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.2/AndroidEverything-v0.1.2-windows-SHA256.txt).
+3. Verify the ZIP, then extract every file into the same directory.
 4. Double-click `AndroidEverything.exe`.
 
 Python is not required for the Windows executable. Windows may display a SmartScreen notice because this early release is not code-signed; review the publisher and checksum before choosing to run it.
@@ -97,16 +98,12 @@ Python is not required for the Windows executable. Windows may display a SmartSc
 To verify the downloaded executable, open PowerShell in its directory and run:
 
 ```powershell
-$expected = (Get-Content .\AndroidEverything-v0.1.1-SHA256.txt).Split()[0]
-$actual = (Get-FileHash .\AndroidEverything.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\AndroidEverything-v0.1.2-windows-SHA256.txt).Split()[0]
+$actual = (Get-FileHash .\AndroidEverything-v0.1.2-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
 $actual -eq $expected
 ```
 
-Continue when the command returns `True`. The expected SHA-256 value for v0.1.1 is:
-
-```text
-44365610274edcab31d383a8285bf7dfcfcca2a7b38dfd8db79907d617f4598d
-```
+Continue when the command returns `True`. The release page also displays the expected SHA-256 value.
 
 ### 3.2 Run from source
 

@@ -3,6 +3,8 @@ Configuration for Android Everything app.
 """
 import os
 import shutil
+import sys
+from typing import Optional
 
 from version import __version__
 
@@ -10,7 +12,32 @@ APP_NAME = "AndroidEverything"
 DISPLAY_NAME = "Android Everything"
 
 # ADB Configuration
-ADB_PATH = os.environ.get("ANDROID_EVERYTHING_ADB") or shutil.which("adb") or "adb"
+def get_runtime_dir() -> str:
+    """Return the source directory or the packaged executable directory."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def find_adb_path(runtime_dir: Optional[str] = None) -> str:
+    """Locate ADB using explicit, packaged, and PATH-based locations."""
+    override = os.environ.get("ANDROID_EVERYTHING_ADB")
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+
+    base_dir = runtime_dir or get_runtime_dir()
+    packaged_candidates = [
+        os.path.join(base_dir, "adb.exe"),
+        os.path.join(base_dir, "platform-tools", "adb.exe"),
+    ]
+    for candidate in packaged_candidates:
+        if os.path.isfile(candidate):
+            return candidate
+
+    return shutil.which("adb") or "adb"
+
+
+ADB_PATH = find_adb_path()
 
 # Default paths to scan on Android device
 SCAN_PATHS = [

@@ -2,6 +2,23 @@
 
 All notable changes to Android Everything are documented in this file.
 
+## [0.1.2] - 2026-08-18
+
+### Added
+
+- Publish a complete Windows ZIP containing Android Everything, ADB, its required DLLs, and the Android Platform Tools notice.
+- Automatically discover `adb.exe` next to the packaged application or inside a sibling `platform-tools` directory.
+
+### Fixed
+
+- Show a status-bar message instead of allowing SQLite search failures to escape the Tkinter callback.
+- Accept usable Android listings when protected child directories make recursive `ls` return status 1.
+- Require a scan-completion marker so interrupted ADB output cannot replace the previous index.
+
+### Tests
+
+- Add regression coverage for packaged ADB discovery, partial Android listings, and interrupted scans.
+
 ## [0.1.1] - 2026-08-16
 
 ### Fixed
@@ -34,5 +51,6 @@ All notable changes to Android Everything are documented in this file.
 - Keep the main window usable when ADB is not installed and display setup guidance instead of exiting.
 - Report packaged startup errors through a GUI dialog and persistent log rather than a console prompt.
 
+[0.1.2]: https://github.com/luli395/android_everything/releases/tag/v0.1.2
 [0.1.1]: https://github.com/luli395/android_everything/releases/tag/v0.1.1
 [0.1.0]: https://github.com/luli395/android_everything/releases/tag/v0.1.0

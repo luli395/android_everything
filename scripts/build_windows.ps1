@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipInstall
+    [switch]$SkipInstall,
+    [string]$AdbPath = $env:ANDROID_EVERYTHING_ADB
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,7 +12,9 @@ $VenvDir = Join-Path $ProjectRoot ".venv"
 $Python = Join-Path $VenvDir "Scripts\python.exe"
 $DistDir = Join-Path $ProjectRoot "dist"
 $ExePath = Join-Path $DistDir "AndroidEverything.exe"
-$ChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.1-SHA256.txt"
+$ChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.2-SHA256.txt"
+$ZipPath = Join-Path $DistDir "AndroidEverything-v0.1.2-windows.zip"
+$ZipChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.2-windows-SHA256.txt"
 $VersionFile = Join-Path $ProjectRoot "packaging\windows-version-info.txt"
 
 Push-Location $ProjectRoot
@@ -27,7 +30,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "PyInstaller installation failed with exit code $LASTEXITCODE" }
     }
 
-    Remove-Item -LiteralPath $ExePath, $ChecksumPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $ExePath, $ChecksumPath, $ZipPath, $ZipChecksumPath `
+        -Force -ErrorAction SilentlyContinue
 
     & $Python -m PyInstaller `
         --noconfirm `
@@ -47,9 +51,53 @@ try {
     $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ExePath).Hash.ToLowerInvariant()
     "$Hash  AndroidEverything.exe" | Set-Content -LiteralPath $ChecksumPath -Encoding ascii
 
+    if (-not $AdbPath) {
+        $AdbCommand = Get-Command adb.exe -ErrorAction SilentlyContinue
+        if ($AdbCommand) {
+            $AdbPath = $AdbCommand.Source
+        }
+    }
+
+    $PackageFiles = @($ExePath, $ChecksumPath)
+    if ($AdbPath) {
+        $ResolvedAdbPath = (Resolve-Path -LiteralPath $AdbPath).Path
+        $AdbSourceDir = Split-Path -Parent $ResolvedAdbPath
+
+        foreach ($Name in @("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll")) {
+            $SourcePath = Join-Path $AdbSourceDir $Name
+            if (-not (Test-Path -LiteralPath $SourcePath)) {
+                throw "Required Android Platform Tools file is missing: $SourcePath"
+            }
+
+            $DestinationPath = Join-Path $DistDir $Name
+            Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+            $PackageFiles += $DestinationPath
+        }
+
+        foreach ($Name in @("NOTICE.txt", "source.properties")) {
+            $SourcePath = Join-Path $AdbSourceDir $Name
+            if (Test-Path -LiteralPath $SourcePath) {
+                $DestinationPath = Join-Path $DistDir $Name
+                Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+                $PackageFiles += $DestinationPath
+            }
+        }
+    }
+    else {
+        Write-Warning "ADB was not found; the Windows ZIP will require a separate ADB installation."
+    }
+
+    Compress-Archive -LiteralPath $PackageFiles -DestinationPath $ZipPath -CompressionLevel Optimal
+    $ZipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ZipPath).Hash.ToLowerInvariant()
+    "$ZipHash  AndroidEverything-v0.1.2-windows.zip" | `
+        Set-Content -LiteralPath $ZipChecksumPath -Encoding ascii
+
     Write-Host "Built: $ExePath"
     Write-Host "SHA-256: $Hash"
     Write-Host "Checksum: $ChecksumPath"
+    Write-Host "Package: $ZipPath"
+    Write-Host "Package SHA-256: $ZipHash"
+    Write-Host "Package checksum: $ZipChecksumPath"
 }
 finally {
     Pop-Location
