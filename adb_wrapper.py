@@ -4,6 +4,7 @@ ADB wrapper for communicating with Android devices.
 import subprocess
 import os
 import re
+import shlex
 import shutil
 from typing import List, Optional, Callable
 from dataclasses import dataclass
@@ -174,7 +175,7 @@ class ADBWrapper:
         """
         # Use find with stat-like output for efficiency
         # Format: type|size|mtime|path
-        cmd = f'find "{path}" -type f 2>/dev/null | head -100000'
+        cmd = f'find {shlex.quote(path)} -type f 2>/dev/null | head -100000'
         
         output = self.shell(cmd, timeout=120)
         
@@ -213,7 +214,7 @@ class ADBWrapper:
         Returns:
             List of FileInfo objects
         """
-        cmd = f'ls -la "{path}" 2>/dev/null'
+        cmd = f'ls -la {shlex.quote(path)} 2>/dev/null'
         output = self.shell(cmd)
         
         files = []
@@ -288,8 +289,11 @@ class ADBWrapper:
         Returns:
             True if successful
         """
+        if not remote_path or not remote_path.startswith("/"):
+            return False
+
         try:
-            self.shell(f'rm -f "{remote_path}" 2>&1')
+            self.shell(f"rm -f {shlex.quote(remote_path)} 2>&1")
             return True
         except ADBError:
             return False

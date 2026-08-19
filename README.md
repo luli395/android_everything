@@ -145,6 +145,7 @@ android_everything/
 |-- file_indexer.py     # Device scanner and indexing pipeline
 |-- database.py         # SQLite and FTS5 persistence
 |-- search_engine.py    # Search API and query cache
+|-- path_utils.py       # Safe Windows download-path handling
 |-- config.py           # Application defaults
 |-- docs/               # User documentation
 |-- scripts/            # Windows build script

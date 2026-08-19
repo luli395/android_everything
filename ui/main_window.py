@@ -19,6 +19,11 @@ from adb_wrapper import get_adb, ADBWrapper, DeviceInfo, ADBError
 from file_indexer import FileIndexer
 from search_engine import get_search_engine, SearchEngine
 from database import SearchQueryError
+from path_utils import (
+    available_download_path,
+    cached_download_path,
+    sanitize_windows_filename,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -457,7 +462,12 @@ class MainWindow:
         import tempfile
         temp_dir = os.path.join(tempfile.gettempdir(), "android_everything")
         os.makedirs(temp_dir, exist_ok=True)
-        local_path = os.path.join(temp_dir, filename)
+        cache_identity = f"{self._current_device or ''}\0{remote_path}"
+        local_path = cached_download_path(
+            temp_dir,
+            filename,
+            cache_identity,
+        )
         
         self.status_var.set(f"Downloading {filename}...")
         
@@ -493,7 +503,7 @@ class MainWindow:
         # Ask for save location
         default_name = file.get("name", "file")
         local_path = filedialog.asksaveasfilename(
-            initialfile=default_name,
+            initialfile=sanitize_windows_filename(default_name),
             title="Save file to..."
         )
         
@@ -533,15 +543,43 @@ class MainWindow:
             self.status_var.set(f"Downloading {len(files)} files...")
             
             def do_pull_multiple():
+                downloaded = 0
+                failed = 0
+                reserved_paths = set()
                 for file in files:
                     remote_path = file.get("path", "")
                     name = file.get("name", "file")
-                    local_path = os.path.join(folder, name)
-                    self.adb.pull_file(remote_path, local_path)
-                
-                self.root.after(0, lambda: self.status_var.set(f"Downloaded {len(files)} files"))
+                    if not remote_path:
+                        failed += 1
+                        continue
+
+                    local_path = available_download_path(
+                        folder,
+                        name,
+                        reserved_paths,
+                    )
+                    if self.adb.pull_file(remote_path, local_path):
+                        downloaded += 1
+                    else:
+                        failed += 1
+
+                self.root.after(
+                    0,
+                    lambda: self._on_pull_multiple_complete(downloaded, failed),
+                )
             
             threading.Thread(target=do_pull_multiple, daemon=True).start()
+
+    def _on_pull_multiple_complete(self, downloaded: int, failed: int):
+        """Report the real outcome of a multi-file download."""
+        self.status_var.set(
+            f"Downloaded {downloaded} file(s); {failed} failed"
+        )
+        if failed:
+            messagebox.showwarning(
+                "Download Warning",
+                f"Downloaded {downloaded} file(s). {failed} file(s) failed.",
+            )
     
     def _show_in_explorer(self):
         """Download file and show in Windows Explorer."""
@@ -557,10 +595,14 @@ class MainWindow:
         
         # Download to temp folder
         import tempfile
-        import subprocess
         temp_dir = os.path.join(tempfile.gettempdir(), "android_everything")
         os.makedirs(temp_dir, exist_ok=True)
-        local_path = os.path.join(temp_dir, filename)
+        cache_identity = f"{self._current_device or ''}\0{remote_path}"
+        local_path = cached_download_path(
+            temp_dir,
+            filename,
+            cache_identity,
+        )
         
         self.status_var.set(f"Downloading {filename}...")
         

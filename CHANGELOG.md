@@ -2,6 +2,16 @@
 
 All notable changes to Android Everything are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Quote Android paths before passing them to remote shell file operations.
+- Sanitize Android filenames used on Windows and prevent batch downloads from
+  overwriting existing or same-named files.
+- Keep temporary downloads for same-named files in separate cache paths.
+- Report the actual success and failure counts for batch downloads.
+
 ## [0.1.2] - 2026-08-18
 
 ### Added
@@ -51,6 +61,7 @@ All notable changes to Android Everything are documented in this file.
 - Keep the main window usable when ADB is not installed and display setup guidance instead of exiting.
 - Report packaged startup errors through a GUI dialog and persistent log rather than a console prompt.
 
+[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.2...HEAD
 [0.1.2]: https://github.com/luli395/android_everything/releases/tag/v0.1.2
 [0.1.1]: https://github.com/luli395/android_everything/releases/tag/v0.1.1
 [0.1.0]: https://github.com/luli395/android_everything/releases/tag/v0.1.0

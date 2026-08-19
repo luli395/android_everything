@@ -181,7 +181,7 @@ The temporary directory is normally:
 2. Right-click and choose **Pull to PC**.
 3. For one file, choose a destination file name. For multiple files, choose a destination directory.
 
-Files with identical names may overwrite one another when saved to the same directory. Prepare the destination directory accordingly.
+Android filenames containing Windows-reserved characters are converted to safe local filenames. When several selected files have the same name, or the destination already contains that name, Android Everything adds a numeric suffix such as `report (1).txt` instead of overwriting a file.
 
 ### 6.3 Show a file in File Explorer
 
