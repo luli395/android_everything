@@ -43,7 +43,6 @@ class ADBWrapper:
     
     def __init__(self, adb_path: str = ADB_PATH):
         self.adb_path = adb_path
-        self.current_device: Optional[str] = None
         
         if not os.path.isfile(self.adb_path) and not shutil.which(self.adb_path):
             raise ADBError(
@@ -99,11 +98,11 @@ class ADBWrapper:
 
         return result
     
-    def _device_args(self) -> List[str]:
-        """Get device-specific arguments if a device is selected."""
-        if self.current_device:
-            return ["-s", self.current_device]
-        return []
+    def _device_args(self, device_serial: str) -> List[str]:
+        """Return arguments that bind a command to one explicit device."""
+        if not device_serial or not device_serial.strip():
+            raise ADBError("A device serial is required for this ADB command")
+        return ["-s", device_serial]
     
     def get_devices(self) -> List[DeviceInfo]:
         """
@@ -143,32 +142,42 @@ class ADBWrapper:
         
         return devices
     
-    def select_device(self, serial: str) -> None:
-        """Select a device for subsequent commands."""
-        self.current_device = serial
-    
-    def shell(self, command: str, timeout: int = 60) -> str:
+    def shell(
+        self,
+        command: str,
+        timeout: int = 60,
+        *,
+        device_serial: str,
+    ) -> str:
         """
         Execute a shell command on the device.
         
         Args:
             command: Shell command to execute
             timeout: Command timeout in seconds
+            device_serial: Device that must receive the command
             
         Returns:
             Command output
         """
-        args = self._device_args() + ["shell", command]
+        args = self._device_args(device_serial) + ["shell", command]
         result = self._run_command(args, timeout=timeout)
         return result.stdout
     
-    def list_files_fast(self, path: str, progress_callback: Optional[Callable[[int], None]] = None) -> List[FileInfo]:
+    def list_files_fast(
+        self,
+        path: str,
+        progress_callback: Optional[Callable[[int], None]] = None,
+        *,
+        device_serial: str,
+    ) -> List[FileInfo]:
         """
         Fast file listing using 'find' command.
         
         Args:
             path: Path to scan
             progress_callback: Optional callback for progress updates
+            device_serial: Device whose files should be listed
             
         Returns:
             List of FileInfo objects
@@ -177,7 +186,11 @@ class ADBWrapper:
         # Format: type|size|mtime|path
         cmd = f'find {shlex.quote(path)} -type f 2>/dev/null | head -100000'
         
-        output = self.shell(cmd, timeout=120)
+        output = self.shell(
+            cmd,
+            timeout=120,
+            device_serial=device_serial,
+        )
         
         files = []
         lines = output.strip().split('\n')
@@ -203,19 +216,25 @@ class ADBWrapper:
         
         return files
     
-    def list_files_detailed(self, path: str) -> List[FileInfo]:
+    def list_files_detailed(
+        self,
+        path: str,
+        *,
+        device_serial: str,
+    ) -> List[FileInfo]:
         """
         List files with detailed information using 'ls -la'.
         Slower but includes size and date.
         
         Args:
             path: Path to list
+            device_serial: Device whose files should be listed
             
         Returns:
             List of FileInfo objects
         """
         cmd = f'ls -la {shlex.quote(path)} 2>/dev/null'
-        output = self.shell(cmd)
+        output = self.shell(cmd, device_serial=device_serial)
         
         files = []
         for line in output.strip().split('\n'):
@@ -260,18 +279,29 @@ class ADBWrapper:
         
         return files
     
-    def pull_file(self, remote_path: str, local_path: str) -> bool:
+    def pull_file(
+        self,
+        remote_path: str,
+        local_path: str,
+        *,
+        device_serial: str,
+    ) -> bool:
         """
         Download a file from the device.
         
         Args:
             remote_path: Path on device
             local_path: Path on PC
+            device_serial: Device to download from
             
         Returns:
             True if successful
         """
-        args = self._device_args() + ["pull", remote_path, local_path]
+        args = self._device_args(device_serial) + [
+            "pull",
+            remote_path,
+            local_path,
+        ]
         try:
             result = self._run_command(args, timeout=300, check=False)
         except ADBError:
@@ -279,12 +309,18 @@ class ADBWrapper:
 
         return result.returncode == 0
     
-    def delete_file(self, remote_path: str) -> bool:
+    def delete_file(
+        self,
+        remote_path: str,
+        *,
+        device_serial: str,
+    ) -> bool:
         """
         Delete a file on the device.
         
         Args:
             remote_path: Path on device
+            device_serial: Device to delete from
             
         Returns:
             True if successful
@@ -293,19 +329,25 @@ class ADBWrapper:
             return False
 
         try:
-            self.shell(f"rm -f {shlex.quote(remote_path)} 2>&1")
+            self.shell(
+                f"rm -f {shlex.quote(remote_path)} 2>&1",
+                device_serial=device_serial,
+            )
             return True
         except ADBError:
             return False
     
-    def get_storage_info(self) -> dict:
+    def get_storage_info(self, *, device_serial: str) -> dict:
         """
         Get storage information from device.
         
         Returns:
             Dict with total, used, available space in bytes
         """
-        output = self.shell("df -h /sdcard 2>/dev/null | tail -1")
+        output = self.shell(
+            "df -h /sdcard 2>/dev/null | tail -1",
+            device_serial=device_serial,
+        )
         
         # Parse df output
         parts = output.split()
@@ -318,7 +360,7 @@ class ADBWrapper:
         
         return {"total": "?", "used": "?", "available": "?"}
     
-    def get_storage_paths(self) -> List[str]:
+    def get_storage_paths(self, *, device_serial: str) -> List[str]:
         """
         Detect all available storage paths including SD card and USB storage.
         
@@ -332,7 +374,10 @@ class ADBWrapper:
         
         # Detect external/SD card storage from /storage
         try:
-            output = self.shell("ls -d /storage/*/ 2>/dev/null")
+            output = self.shell(
+                "ls -d /storage/*/ 2>/dev/null",
+                device_serial=device_serial,
+            )
             for line in output.strip().split('\n'):
                 line = line.strip().rstrip('/')
                 if not line:
@@ -347,7 +392,10 @@ class ADBWrapper:
         
         # Check /mnt/media_rw (SD cards on some devices)
         try:
-            output = self.shell("ls -d /mnt/media_rw/*/ 2>/dev/null")
+            output = self.shell(
+                "ls -d /mnt/media_rw/*/ 2>/dev/null",
+                device_serial=device_serial,
+            )
             for line in output.strip().split('\n'):
                 line = line.strip().rstrip('/')
                 if line and line.startswith('/mnt/'):
@@ -357,7 +405,10 @@ class ADBWrapper:
         
         # Check /mnt/sdcard (legacy)
         try:
-            output = self.shell("ls -d /mnt/sdcard 2>/dev/null")
+            output = self.shell(
+                "ls -d /mnt/sdcard 2>/dev/null",
+                device_serial=device_serial,
+            )
             if output.strip() and 'No such file' not in output:
                 paths.add("/mnt/sdcard")
         except ADBError:
@@ -365,7 +416,10 @@ class ADBWrapper:
         
         # Check /mnt/extSdCard (Samsung legacy)
         try:
-            output = self.shell("ls -d /mnt/extSdCard 2>/dev/null")
+            output = self.shell(
+                "ls -d /mnt/extSdCard 2>/dev/null",
+                device_serial=device_serial,
+            )
             if output.strip() and 'No such file' not in output:
                 paths.add("/mnt/extSdCard")
         except ADBError:
@@ -373,7 +427,10 @@ class ADBWrapper:
         
         # Check /mnt/usb_storage (USB OTG)
         try:
-            output = self.shell("ls -d /mnt/usb_storage/*/ 2>/dev/null")
+            output = self.shell(
+                "ls -d /mnt/usb_storage/*/ 2>/dev/null",
+                device_serial=device_serial,
+            )
             for line in output.strip().split('\n'):
                 line = line.strip().rstrip('/')
                 if line and line.startswith('/mnt/usb'):
@@ -383,7 +440,10 @@ class ADBWrapper:
         
         # Check /data/media/0 (internal on some devices, may need root)
         try:
-            output = self.shell("ls -d /data/media/0 2>/dev/null")
+            output = self.shell(
+                "ls -d /data/media/0 2>/dev/null",
+                device_serial=device_serial,
+            )
             if output.strip() and 'Permission denied' not in output and 'No such file' not in output:
                 paths.add("/data/media/0")
         except ADBError:
@@ -391,7 +451,10 @@ class ADBWrapper:
         
         # Check environment variable for external storage
         try:
-            output = self.shell("echo $EXTERNAL_STORAGE")
+            output = self.shell(
+                "echo $EXTERNAL_STORAGE",
+                device_serial=device_serial,
+            )
             ext = output.strip()
             if ext and ext.startswith('/'):
                 paths.add(ext)
@@ -400,7 +463,10 @@ class ADBWrapper:
         
         # Check secondary storage environment variable
         try:
-            output = self.shell("echo $SECONDARY_STORAGE")
+            output = self.shell(
+                "echo $SECONDARY_STORAGE",
+                device_serial=device_serial,
+            )
             sec = output.strip()
             if sec and sec.startswith('/'):
                 for p in sec.split(':'):

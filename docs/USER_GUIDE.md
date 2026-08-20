@@ -127,6 +127,8 @@ The first time you connect a device, build an index before searching:
 
 While indexing, the button changes to **Stop**. Click it to request cancellation of the current indexing operation.
 
+The device selector and **Refresh** button remain locked until indexing finishes or cancellation completes. Every ADB command stays bound to the device that was selected when indexing started.
+
 Android Everything automatically checks internal storage, SD cards, and several common external-storage paths. The index records file metadata—file name, device path, size, and modification time—but does not copy all file contents to the computer.
 
 The generated index is stored as `%LOCALAPPDATA%\AndroidEverything\files.db`. Clicking **Index** again atomically replaces the old index for the selected device only after a complete scan succeeds.
@@ -164,6 +166,8 @@ Click a result-list column heading to sort by:
 Click the same heading again to switch between ascending and descending order.
 
 ## 6. File Operations
+
+Each download, open, reveal, or delete operation is bound to the device selected when the operation starts. The device selector and **Refresh** button remain locked until all active device operations finish.
 
 ### 6.1 Download and open a file
 

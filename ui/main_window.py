@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import logging
 import threading
-from typing import List, Optional
+from typing import Callable, List, Optional
 import os
 
 from ui.styles import COLORS, FONTS, apply_dark_theme
@@ -63,6 +63,7 @@ class MainWindow:
         self._devices: List[DeviceInfo] = []
         self._current_device: Optional[str] = None
         self._search_timer: Optional[str] = None
+        self._device_operation_count = 0
         
         # Build UI
         self._setup_ui()
@@ -99,6 +100,59 @@ class MainWindow:
         
         # Status bar
         self._create_statusbar()
+
+    def _begin_device_operation(self):
+        """Lock device selection while a device-bound operation is active."""
+        self._device_operation_count += 1
+        if self._device_operation_count == 1:
+            self.device_combo.configure(state="disabled")
+            self.refresh_btn.configure(state="disabled")
+
+    def _end_device_operation(self):
+        """Release one device-operation lock and restore the controls."""
+        if self._device_operation_count <= 0:
+            logger.warning("Unbalanced device-operation unlock request")
+            return
+
+        self._device_operation_count -= 1
+        if self._device_operation_count == 0:
+            if self.adb:
+                self.device_combo.configure(state="readonly")
+                self.refresh_btn.configure(state="normal")
+            else:
+                self.device_combo.configure(state="disabled")
+                self.refresh_btn.configure(state="disabled")
+
+    def _start_device_worker(self, target: Callable[[], None]):
+        """Run a background device task while holding the selector lock."""
+        self._begin_device_operation()
+
+        def run_target():
+            try:
+                target()
+            except Exception as error:
+                logger.exception("Background device operation failed")
+                message = str(error)
+                self.root.after(
+                    0,
+                    lambda: self._on_device_worker_failure(message),
+                )
+
+        try:
+            threading.Thread(target=run_target, daemon=True).start()
+        except Exception:
+            self._end_device_operation()
+            raise
+
+    def _on_device_worker_failure(self, error: str):
+        """Restore device controls after an unexpected worker failure."""
+        self._end_device_operation()
+        self.status_var.set(f"Device operation failed: {error}")
+        messagebox.showerror(
+            "Device Operation Error",
+            f"The device operation failed.\n\n{error}",
+            parent=self.root,
+        )
     
     def _create_header(self):
         """Create the header with search bar and controls."""
@@ -355,7 +409,6 @@ class MainWindow:
         if idx >= 0 and idx < len(self._devices):
             device = self._devices[idx]
             self._current_device = device.serial
-            self.adb.select_device(device.serial)
             
             # Load file count
             count = self.search_engine.get_file_count(device.serial)
@@ -390,6 +443,8 @@ class MainWindow:
             self.index_btn.configure(text="Stopping...", state="disabled")
             self.status_var.set("Stopping indexing...")
             return
+
+        device_serial = self._current_device
         
         self.index_btn.configure(text="⏹️ Stop")
         self.progress.grid()
@@ -399,7 +454,10 @@ class MainWindow:
             self.root.after(0, lambda: self._update_progress(message, current, total))
         
         def on_complete(count: int):
-            self.root.after(0, lambda: self._on_indexing_complete(count))
+            self.root.after(
+                0,
+                lambda: self._on_indexing_complete(device_serial, count),
+            )
 
         def on_error(error: Exception):
             self.root.after(0, lambda: self._on_indexing_error(str(error)))
@@ -407,27 +465,49 @@ class MainWindow:
         def on_cancelled():
             self.root.after(0, self._on_indexing_cancelled)
         
-        self.indexer.index_device(
-            self._current_device,
-            progress_callback=on_progress,
-            complete_callback=on_complete,
-            error_callback=on_error,
-            cancelled_callback=on_cancelled,
-        )
+        self._begin_device_operation()
+        try:
+            started = self.indexer.index_device(
+                device_serial,
+                progress_callback=on_progress,
+                complete_callback=on_complete,
+                error_callback=on_error,
+                cancelled_callback=on_cancelled,
+            )
+        except Exception:
+            self._end_device_operation()
+            self.index_btn.configure(text="📥 Index", state="normal")
+            self.progress.grid_remove()
+            raise
+
+        if not started:
+            self._end_device_operation()
+            self.index_btn.configure(text="📥 Index", state="normal")
+            self.progress.grid_remove()
+            self.status_var.set("Indexing is already in progress")
     
     def _update_progress(self, message: str, current: int, total: int):
         """Update progress bar and status."""
         self.status_var.set(message)
         self.progress["value"] = current
     
-    def _on_indexing_complete(self, count: int):
+    def _on_indexing_complete(self, device_serial: str, count: int):
         """Handle indexing completion."""
+        self._end_device_operation()
         self.index_btn.configure(text="📥 Index", state="normal")
         self.progress.grid_remove()
+
+        if self._current_device != device_serial:
+            self.status_var.set(
+                f"Indexed {count:,} files on {device_serial}"
+            )
+            self.search_engine.clear_cache()
+            return
+
         self.count_var.set(f"{count:,} files indexed")
         
         # Update extension filter
-        stats = self.search_engine.get_extension_stats(self._current_device)
+        stats = self.search_engine.get_extension_stats(device_serial)
         exts = ["All"] + [ext.upper().lstrip(".") for ext, _ in stats if ext]
         self.ext_combo.configure(values=exts)
         
@@ -437,6 +517,7 @@ class MainWindow:
 
     def _on_indexing_error(self, error: str):
         """Restore the UI after a failed indexing attempt."""
+        self._end_device_operation()
         self.index_btn.configure(text="📥 Index", state="normal")
         self.progress.grid_remove()
         self.status_var.set(
@@ -445,6 +526,7 @@ class MainWindow:
 
     def _on_indexing_cancelled(self):
         """Restore the UI after a cancelled indexing attempt."""
+        self._end_device_operation()
         self.index_btn.configure(text="📥 Index", state="normal")
         self.progress.grid_remove()
         self.status_var.set(
@@ -453,16 +535,17 @@ class MainWindow:
     
     def _on_file_double_click(self, file: dict):
         """Handle double-click on a file - download and open."""
+        device_serial = self._current_device
         remote_path = file.get("path", "")
         filename = file.get("name", "file")
-        if not remote_path:
+        if not self.adb or not device_serial or not remote_path:
             return
         
         # Download to temp folder and open
         import tempfile
         temp_dir = os.path.join(tempfile.gettempdir(), "android_everything")
         os.makedirs(temp_dir, exist_ok=True)
-        cache_identity = f"{self._current_device or ''}\0{remote_path}"
+        cache_identity = f"{device_serial}\0{remote_path}"
         local_path = cached_download_path(
             temp_dir,
             filename,
@@ -472,13 +555,18 @@ class MainWindow:
         self.status_var.set(f"Downloading {filename}...")
         
         def do_download_and_open():
-            success = self.adb.pull_file(remote_path, local_path)
+            success = self.adb.pull_file(
+                remote_path,
+                local_path,
+                device_serial=device_serial,
+            )
             self.root.after(0, lambda: self._on_open_complete(success, filename, local_path))
         
-        threading.Thread(target=do_download_and_open, daemon=True).start()
+        self._start_device_worker(do_download_and_open)
     
     def _on_open_complete(self, success: bool, filename: str, local_path: str):
         """Handle download complete and open file."""
+        self._end_device_operation()
         if success and os.path.exists(local_path):
             self.status_var.set(f"Opening {filename}...")
             try:
@@ -496,8 +584,9 @@ class MainWindow:
     
     def _pull_file(self, file: dict):
         """Pull a single file to PC."""
+        device_serial = self._current_device
         remote_path = file.get("path", "")
-        if not remote_path:
+        if not self.adb or not device_serial or not remote_path:
             return
         
         # Ask for save location
@@ -513,13 +602,18 @@ class MainWindow:
         self.status_var.set(f"Downloading {default_name}...")
         
         def do_pull():
-            success = self.adb.pull_file(remote_path, local_path)
+            success = self.adb.pull_file(
+                remote_path,
+                local_path,
+                device_serial=device_serial,
+            )
             self.root.after(0, lambda: self._on_pull_complete(success, default_name))
         
-        threading.Thread(target=do_pull, daemon=True).start()
+        self._start_device_worker(do_pull)
     
     def _on_pull_complete(self, success: bool, filename: str):
         """Handle pull completion."""
+        self._end_device_operation()
         if success:
             self.status_var.set(f"Downloaded: {filename}")
         else:
@@ -528,6 +622,10 @@ class MainWindow:
     
     def _pull_selected(self):
         """Pull selected files to PC."""
+        device_serial = self._current_device
+        if not self.adb or not device_serial:
+            return
+
         files = self.file_list.get_selected_files()
         if not files:
             return
@@ -558,7 +656,11 @@ class MainWindow:
                         name,
                         reserved_paths,
                     )
-                    if self.adb.pull_file(remote_path, local_path):
+                    if self.adb.pull_file(
+                        remote_path,
+                        local_path,
+                        device_serial=device_serial,
+                    ):
                         downloaded += 1
                     else:
                         failed += 1
@@ -568,10 +670,11 @@ class MainWindow:
                     lambda: self._on_pull_multiple_complete(downloaded, failed),
                 )
             
-            threading.Thread(target=do_pull_multiple, daemon=True).start()
+            self._start_device_worker(do_pull_multiple)
 
     def _on_pull_multiple_complete(self, downloaded: int, failed: int):
         """Report the real outcome of a multi-file download."""
+        self._end_device_operation()
         self.status_var.set(
             f"Downloaded {downloaded} file(s); {failed} failed"
         )
@@ -583,6 +686,10 @@ class MainWindow:
     
     def _show_in_explorer(self):
         """Download file and show in Windows Explorer."""
+        device_serial = self._current_device
+        if not self.adb or not device_serial:
+            return
+
         files = self.file_list.get_selected_files()
         if not files:
             return
@@ -597,7 +704,7 @@ class MainWindow:
         import tempfile
         temp_dir = os.path.join(tempfile.gettempdir(), "android_everything")
         os.makedirs(temp_dir, exist_ok=True)
-        cache_identity = f"{self._current_device or ''}\0{remote_path}"
+        cache_identity = f"{device_serial}\0{remote_path}"
         local_path = cached_download_path(
             temp_dir,
             filename,
@@ -607,14 +714,19 @@ class MainWindow:
         self.status_var.set(f"Downloading {filename}...")
         
         def do_download_and_show():
-            success = self.adb.pull_file(remote_path, local_path)
+            success = self.adb.pull_file(
+                remote_path,
+                local_path,
+                device_serial=device_serial,
+            )
             self.root.after(0, lambda: self._on_show_complete(success, filename, local_path))
         
-        threading.Thread(target=do_download_and_show, daemon=True).start()
+        self._start_device_worker(do_download_and_show)
     
     def _on_show_complete(self, success: bool, filename: str, local_path: str):
         """Handle download complete and show in Explorer."""
         import subprocess
+        self._end_device_operation()
         if success and os.path.exists(local_path):
             self.status_var.set(f"Showing {filename} in Explorer...")
             try:
@@ -638,6 +750,10 @@ class MainWindow:
     
     def _delete_selected(self):
         """Delete selected files."""
+        device_serial = self._current_device
+        if not self.adb or not device_serial:
+            return
+
         files = self.file_list.get_selected_files()
         if not files:
             return
@@ -657,30 +773,49 @@ class MainWindow:
             deleted_paths = []
             for file in files:
                 path = file.get("path", "")
-                if self.adb.delete_file(path):
+                if self.adb.delete_file(
+                    path,
+                    device_serial=device_serial,
+                ):
                     deleted += 1
                     deleted_paths.append(path)
             
-            self.root.after(0, lambda: self._on_delete_complete(deleted, len(files), deleted_paths))
+            self.root.after(
+                0,
+                lambda: self._on_delete_complete(
+                    device_serial,
+                    deleted,
+                    len(files),
+                    deleted_paths,
+                ),
+            )
         
-        threading.Thread(target=do_delete, daemon=True).start()
+        self._start_device_worker(do_delete)
     
-    def _on_delete_complete(self, deleted: int, total: int, deleted_paths: list):
+    def _on_delete_complete(
+        self,
+        device_serial: str,
+        deleted: int,
+        total: int,
+        deleted_paths: list,
+    ):
         """Handle delete completion."""
+        self._end_device_operation()
         self.status_var.set(f"Deleted {deleted}/{total} files")
         
         # Remove deleted files from database index
-        if deleted_paths and self._current_device:
+        if deleted_paths:
             from database import get_database
             db = get_database()
-            db.delete_files(self._current_device, deleted_paths)
+            db.delete_files(device_serial, deleted_paths)
             self.search_engine.clear_cache()
         
         if deleted < total:
             messagebox.showwarning("Delete Warning", f"Some files could not be deleted ({total - deleted} failed)")
         
         # Refresh search
-        self._do_search()
+        if self._current_device == device_serial:
+            self._do_search()
     
     def run(self):
         """Run the application."""

@@ -6,6 +6,12 @@ All notable changes to Android Everything are documented in this file.
 
 ### Fixed
 
+- Bind every device-scoped ADB command to an explicit device serial instead of
+  relying on shared mutable selection state.
+- Lock device selection and refresh controls until all active indexing or file
+  operations finish, including overlapping background operations.
+- Apply indexing and deletion results to the device that started the operation
+  even if the visible UI state changes before completion.
 - Quote Android paths before passing them to remote shell file operations.
 - Sanitize Android filenames used on Windows and prevent batch downloads from
   overwriting existing or same-named files.

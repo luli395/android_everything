@@ -67,7 +67,8 @@ The bundled ADB comes from [Android SDK Platform Tools](https://developer.androi
 
 ## Features
 
-- Discover connected Android devices through ADB
+- Discover connected Android devices and bind every file operation to its
+  explicitly selected ADB serial
 - Detect internal storage, SD cards, and common external-storage paths
 - Build a reusable local index of file names, paths, sizes, and modification times
 - Get an Everything-style, search-as-you-type workflow with SQLite FTS5 prefix matching

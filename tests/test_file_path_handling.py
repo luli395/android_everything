@@ -36,6 +36,15 @@ class FakeVar:
         self.value = value
 
 
+class FakeControl:
+    def __init__(self):
+        self.states = []
+
+    def configure(self, **kwargs):
+        if "state" in kwargs:
+            self.states.append(kwargs["state"])
+
+
 class RemotePathHandlingTests(unittest.TestCase):
     def setUp(self):
         self.adb = ADBWrapper(adb_path=sys.executable)
@@ -44,16 +53,26 @@ class RemotePathHandlingTests(unittest.TestCase):
         remote_path = "/sdcard/quote' $(touch injected) ; report.txt"
 
         with patch.object(self.adb, "shell", return_value="") as shell:
-            self.assertTrue(self.adb.delete_file(remote_path))
+            self.assertTrue(self.adb.delete_file(
+                remote_path,
+                device_serial="device-1",
+            ))
 
         shell.assert_called_once_with(
-            f"rm -f {shlex.quote(remote_path)} 2>&1"
+            f"rm -f {shlex.quote(remote_path)} 2>&1",
+            device_serial="device-1",
         )
 
     def test_delete_rejects_empty_and_relative_paths(self):
         with patch.object(self.adb, "shell", return_value="") as shell:
-            self.assertFalse(self.adb.delete_file(""))
-            self.assertFalse(self.adb.delete_file("--help"))
+            self.assertFalse(self.adb.delete_file(
+                "",
+                device_serial="device-1",
+            ))
+            self.assertFalse(self.adb.delete_file(
+                "--help",
+                device_serial="device-1",
+            ))
 
         shell.assert_not_called()
 
@@ -61,8 +80,14 @@ class RemotePathHandlingTests(unittest.TestCase):
         remote_path = "/sdcard/folder's reports"
 
         with patch.object(self.adb, "shell", return_value="") as shell:
-            self.adb.list_files_fast(remote_path)
-            self.adb.list_files_detailed(remote_path)
+            self.adb.list_files_fast(
+                remote_path,
+                device_serial="device-1",
+            )
+            self.adb.list_files_detailed(
+                remote_path,
+                device_serial="device-1",
+            )
 
         fast_command = shell.call_args_list[0].args[0]
         detailed_command = shell.call_args_list[1].args[0]
@@ -167,6 +192,10 @@ class WindowsPathHandlingTests(unittest.TestCase):
             window.adb.pull_file.side_effect = [True, False]
             window.root = ImmediateRoot()
             window.status_var = FakeVar()
+            window._current_device = "device-1"
+            window._device_operation_count = 0
+            window.device_combo = FakeControl()
+            window.refresh_btn = FakeControl()
 
             with patch(
                 "ui.main_window.filedialog.askdirectory",
@@ -182,12 +211,21 @@ class WindowsPathHandlingTests(unittest.TestCase):
                 for call in window.adb.pull_file.call_args_list
             ]
             self.assertEqual(local_paths, ["report_ (1).txt", "report_ (2).txt"])
+            self.assertEqual(
+                [
+                    call.kwargs["device_serial"]
+                    for call in window.adb.pull_file.call_args_list
+                ],
+                ["device-1", "device-1"],
+            )
             self.assertEqual(existing_path.read_text(encoding="utf-8"), "keep")
             self.assertEqual(
                 window.status_var.value,
                 "Downloaded 1 file(s); 1 failed",
             )
             warning.assert_called_once()
+            self.assertEqual(window.device_combo.states, ["disabled", "readonly"])
+            self.assertEqual(window.refresh_btn.states, ["disabled", "normal"])
 
 
 if __name__ == "__main__":

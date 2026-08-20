@@ -76,11 +76,11 @@ class FileIndexer:
         
         def do_index():
             try:
-                self.adb.select_device(device_serial)
-
                 scan_paths = requested_paths
                 if scan_paths is None:
-                    scan_paths = self.adb.get_storage_paths()
+                    scan_paths = self.adb.get_storage_paths(
+                        device_serial=device_serial,
+                    )
                     if not scan_paths:
                         scan_paths = ["/storage/emulated/0"]
                 
@@ -99,7 +99,11 @@ class FileIndexer:
                         )
                     
                     # Get files from device
-                    files = self._scan_path(scan_path, progress_callback)
+                    files = self._scan_path(
+                        device_serial,
+                        scan_path,
+                        progress_callback,
+                    )
                     all_files.extend(files)
                 
                 if self._cancel_requested:
@@ -200,8 +204,9 @@ class FileIndexer:
         return True
     
     def _scan_path(
-        self, 
-        path: str, 
+        self,
+        device_serial: str,
+        path: str,
         progress_callback: Optional[Callable] = None
     ) -> List[FileInfo]:
         """Scan a single path on the device with file sizes using ls -lR (fast)."""
@@ -220,7 +225,11 @@ class FileIndexer:
             f"printf '\n{SCAN_COMPLETE_MARKER}%s\n' \"$scan_status\"; "
             "exit 0"
         )
-        output = self.adb.shell(cmd, timeout=180)
+        output = self.adb.shell(
+            cmd,
+            timeout=180,
+            device_serial=device_serial,
+        )
 
         listing, marker, status_output = output.rpartition(SCAN_COMPLETE_MARKER)
         if not marker:

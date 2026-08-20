@@ -51,7 +51,13 @@ class ADBCommandStatusTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ADBError, r"exit code 2"):
-            self.adb.shell("ls /missing")
+            self.adb.shell("ls /missing", device_serial="device-1")
+
+    def test_device_specific_command_requires_an_explicit_serial(self):
+        self.assertFalse(hasattr(self.adb, "current_device"))
+        self.assertFalse(hasattr(self.adb, "select_device"))
+        with self.assertRaises(TypeError):
+            self.adb.shell("ls /sdcard")
 
     @patch("adb_wrapper.subprocess.run")
     def test_pull_uses_exit_code_instead_of_error_text(self, run):
@@ -64,8 +70,25 @@ class ADBCommandStatusTests(unittest.TestCase):
             ),
         ]
 
-        self.assertTrue(self.adb.pull_file("/phone/good.txt", "good.txt"))
-        self.assertFalse(self.adb.pull_file("/phone/missing.txt", "missing.txt"))
+        self.assertTrue(self.adb.pull_file(
+            "/phone/good.txt",
+            "good.txt",
+            device_serial="device-1",
+        ))
+        self.assertFalse(self.adb.pull_file(
+            "/phone/missing.txt",
+            "missing.txt",
+            device_serial="device-2",
+        ))
+
+        self.assertEqual(
+            run.call_args_list[0].args[0][1:4],
+            ["-s", "device-1", "pull"],
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0][1:4],
+            ["-s", "device-2", "pull"],
+        )
 
     @patch("adb_wrapper.subprocess.run")
     def test_delete_uses_remote_exit_code(self, run):
@@ -76,8 +99,23 @@ class ADBCommandStatusTests(unittest.TestCase):
             ),
         ]
 
-        self.assertTrue(self.adb.delete_file("/phone/good.txt"))
-        self.assertFalse(self.adb.delete_file("/phone/protected.txt"))
+        self.assertTrue(self.adb.delete_file(
+            "/phone/good.txt",
+            device_serial="device-1",
+        ))
+        self.assertFalse(self.adb.delete_file(
+            "/phone/protected.txt",
+            device_serial="device-2",
+        ))
+
+        self.assertEqual(
+            run.call_args_list[0].args[0][1:4],
+            ["-s", "device-1", "shell"],
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0][1:4],
+            ["-s", "device-2", "shell"],
+        )
 
     @patch("adb_wrapper.subprocess.run")
     def test_failed_scan_preserves_the_existing_index(self, run):

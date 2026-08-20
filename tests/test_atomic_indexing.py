@@ -26,15 +26,15 @@ class FakeADB:
         self.error = error
         self.scan_status = scan_status
         self.include_scan_marker = include_scan_marker
-        self.selected_device = None
+        self.storage_device_serials = []
+        self.shell_device_serials = []
 
-    def select_device(self, serial):
-        self.selected_device = serial
-
-    def get_storage_paths(self):
+    def get_storage_paths(self, *, device_serial):
+        self.storage_device_serials.append(device_serial)
         return ["/storage/emulated/0"]
 
-    def shell(self, command, timeout=60):
+    def shell(self, command, timeout=60, *, device_serial):
+        self.shell_device_serials.append(device_serial)
         if self.error:
             raise self.error
         if self.include_scan_marker:
@@ -84,7 +84,8 @@ class AtomicIndexingTests(unittest.TestCase):
             "-rw-rw---- 1 user group 10 2026-08-12 10:00 new one.jpg",
             "-rw-rw---- 1 user group 20 2026-08-12 10:01 new-two.pdf",
         ])
-        self.indexer = FileIndexer(FakeADB(output=output), self.db)
+        adb = FakeADB(output=output)
+        self.indexer = FileIndexer(adb, self.db)
 
         count = self.indexer.index_device_sync("device-1")
 
@@ -95,6 +96,8 @@ class AtomicIndexingTests(unittest.TestCase):
             {row["name"] for row in self.db.search("device-1", "new")},
             {"new one.jpg", "new-two.pdf"},
         )
+        self.assertEqual(adb.storage_device_serials, ["device-1"])
+        self.assertEqual(adb.shell_device_serials, ["device-1"])
 
     def test_scan_failure_preserves_the_previous_index(self):
         self.indexer = FileIndexer(
