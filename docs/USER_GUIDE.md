@@ -88,8 +88,8 @@ Common device states:
 
 ### 3.1 Windows executable
 
-1. Open the [v0.1.2 release](https://github.com/luli395/android_everything/releases/tag/v0.1.2).
-2. Download [AndroidEverything-v0.1.2-windows.zip](https://github.com/luli395/android_everything/releases/download/v0.1.2/AndroidEverything-v0.1.2-windows.zip) and [AndroidEverything-v0.1.2-windows-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.2/AndroidEverything-v0.1.2-windows-SHA256.txt).
+1. Open the [v0.1.3 release](https://github.com/luli395/android_everything/releases/tag/v0.1.3).
+2. Download [AndroidEverything-v0.1.3-windows.zip](https://github.com/luli395/android_everything/releases/download/v0.1.3/AndroidEverything-v0.1.3-windows.zip) and [AndroidEverything-v0.1.3-windows-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.3/AndroidEverything-v0.1.3-windows-SHA256.txt).
 3. Verify the ZIP, then extract every file into the same directory.
 4. Double-click `AndroidEverything.exe`.
 
@@ -98,8 +98,8 @@ Python is not required for the Windows executable. Windows may display a SmartSc
 To verify the downloaded executable, open PowerShell in its directory and run:
 
 ```powershell
-$expected = (Get-Content .\AndroidEverything-v0.1.2-windows-SHA256.txt).Split()[0]
-$actual = (Get-FileHash .\AndroidEverything-v0.1.2-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\AndroidEverything-v0.1.3-windows-SHA256.txt).Split()[0]
+$actual = (Get-FileHash .\AndroidEverything-v0.1.3-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
 $actual -eq $expected
 ```
 

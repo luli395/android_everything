@@ -4,6 +4,8 @@ All notable changes to Android Everything are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-20
+
 ### Fixed
 
 - Bind every device-scoped ADB command to an explicit device serial instead of
@@ -17,6 +19,11 @@ All notable changes to Android Everything are documented in this file.
   overwriting existing or same-named files.
 - Keep temporary downloads for same-named files in separate cache paths.
 - Report the actual success and failure counts for batch downloads.
+
+### Tests
+
+- Add regression coverage for explicit ADB device binding, UI operation locks,
+  Android shell-path quoting, and Windows download-path handling.
 
 ## [0.1.2] - 2026-08-18
 
@@ -67,7 +74,8 @@ All notable changes to Android Everything are documented in this file.
 - Keep the main window usable when ADB is not installed and display setup guidance instead of exiting.
 - Report packaged startup errors through a GUI dialog and persistent log rather than a console prompt.
 
-[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/luli395/android_everything/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/luli395/android_everything/releases/tag/v0.1.2
 [0.1.1]: https://github.com/luli395/android_everything/releases/tag/v0.1.1
 [0.1.0]: https://github.com/luli395/android_everything/releases/tag/v0.1.0

@@ -12,9 +12,9 @@ $VenvDir = Join-Path $ProjectRoot ".venv"
 $Python = Join-Path $VenvDir "Scripts\python.exe"
 $DistDir = Join-Path $ProjectRoot "dist"
 $ExePath = Join-Path $DistDir "AndroidEverything.exe"
-$ChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.2-SHA256.txt"
-$ZipPath = Join-Path $DistDir "AndroidEverything-v0.1.2-windows.zip"
-$ZipChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.2-windows-SHA256.txt"
+$ChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.3-SHA256.txt"
+$ZipPath = Join-Path $DistDir "AndroidEverything-v0.1.3-windows.zip"
+$ZipChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.3-windows-SHA256.txt"
 $VersionFile = Join-Path $ProjectRoot "packaging\windows-version-info.txt"
 
 Push-Location $ProjectRoot
@@ -89,7 +89,7 @@ try {
 
     Compress-Archive -LiteralPath $PackageFiles -DestinationPath $ZipPath -CompressionLevel Optimal
     $ZipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ZipPath).Hash.ToLowerInvariant()
-    "$ZipHash  AndroidEverything-v0.1.2-windows.zip" | `
+    "$ZipHash  AndroidEverything-v0.1.3-windows.zip" | `
         Set-Content -LiteralPath $ZipChecksumPath -Encoding ascii
 
     Write-Host "Built: $ExePath"

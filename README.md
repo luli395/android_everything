@@ -45,19 +45,19 @@ flowchart LR
 
 ## Download for Windows
 
-Current release: **v0.1.2**
+Current release: **v0.1.3**
 
-- [Download the complete Windows ZIP](https://github.com/luli395/android_everything/releases/download/v0.1.2/AndroidEverything-v0.1.2-windows.zip)
-- [Download the ZIP SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.2/AndroidEverything-v0.1.2-windows-SHA256.txt)
-- [View release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.2)
+- [Download the complete Windows ZIP](https://github.com/luli395/android_everything/releases/download/v0.1.3/AndroidEverything-v0.1.3-windows.zip)
+- [Download the ZIP SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.3/AndroidEverything-v0.1.3-windows-SHA256.txt)
+- [View release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.3)
 
 The ZIP includes `AndroidEverything.exe`, ADB, the required ADB DLLs, and the Android Platform Tools notice. Python and a separate ADB installation are not required. Extract the complete ZIP before running the application.
 
 To verify the package in PowerShell, place the ZIP and checksum file in the same directory and run:
 
 ```powershell
-$expected = (Get-Content .\AndroidEverything-v0.1.2-windows-SHA256.txt).Split()[0]
-$actual = (Get-FileHash .\AndroidEverything-v0.1.2-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\AndroidEverything-v0.1.3-windows-SHA256.txt).Split()[0]
+$actual = (Get-FileHash .\AndroidEverything-v0.1.3-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
 $actual -eq $expected
 ```
 
@@ -88,7 +88,7 @@ Running from source additionally requires Python 3.8 or later with Tkinter and [
 
 ### Windows executable
 
-1. Download the complete ZIP from the [v0.1.2 release](https://github.com/luli395/android_everything/releases/tag/v0.1.2).
+1. Download the complete ZIP from the [v0.1.3 release](https://github.com/luli395/android_everything/releases/tag/v0.1.3).
 2. Extract every file to the same directory.
 3. Connect and authorize the Android device, then start `AndroidEverything.exe`.
 
