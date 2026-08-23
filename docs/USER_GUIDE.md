@@ -141,11 +141,18 @@ The generated index is stored as `%LOCALAPPDATA%\AndroidEverything\files.db`. Cl
 
 Enter a file name or a keyword from its path in the search box. Results update automatically after a short delay, or you can press Enter to search immediately.
 
-Search uses prefix matching. For example:
+Search uses case-insensitive substring matching across file names and Android
+paths. For example:
 
-- `photo` matches terms beginning with `photo`
-- `report 2026` searches file names and paths for both term prefixes
+- `hot` matches `photo.jpg`, even though `hot` is in the middle of the name
+- `amera` matches a path containing `/DCIM/Camera/`
+- `report 2026` requires both substrings to appear in the name or path
+- One- and two-character searches are also supported
 - Clearing the search box displays files from the selected device's index
+
+Punctuation is treated as a separator rather than SQLite query syntax, so
+quotes, parentheses, brackets, and hyphens can be entered without causing a
+search error.
 
 The application displays up to 10,000 results per search.
 

@@ -4,6 +4,7 @@ SQLite database for file indexing with FTS5 full-text search.
 import sqlite3
 import os
 import re
+import unicodedata
 from typing import Callable, List, Optional, Tuple
 from datetime import datetime
 from contextlib import contextmanager
@@ -11,24 +12,52 @@ from contextlib import contextmanager
 from config import DATABASE_PATH
 
 
+SCHEMA_VERSION = 1
+TRIGRAM_MIN_LENGTH = 3
+TRIGRAM_TOKENIZER = "trigram case_sensitive 0 remove_diacritics 1"
+
+
 class SearchQueryError(RuntimeError):
     """Raised when SQLite cannot complete a file search."""
 
 
-def build_fts_prefix_query(query: str) -> Optional[str]:
-    """Convert user text into a safe FTS5 prefix query.
+def extract_search_terms(query: str) -> List[str]:
+    """Return literal Unicode word terms from user-entered search text.
 
-    FTS5 punctuation and operators such as quotes, parentheses, ``AND``, and
-    ``OR`` must not be interpreted as query syntax. Extracting Unicode word
-    tokens and quoting each token preserves the existing all-terms prefix
-    search behavior while preventing malformed MATCH expressions.
+    Punctuation and FTS5 operators are deliberately treated as separators so
+    input such as ``(photo)``, ``notes-or``, or a bare quote can never become
+    MATCH syntax.  This preserves the application's existing safe-query
+    behavior while allowing each returned term to be matched as a substring.
     """
-    tokens = re.findall(r"[^\W_]+", query, flags=re.UNICODE)
-    if not tokens:
+    return re.findall(r"[^\W_]+", query, flags=re.UNICODE)
+
+
+def normalize_short_search_text(value: str) -> str:
+    """Case-fold text and remove combining marks for short-term searches."""
+    normalized = unicodedata.normalize("NFKD", value.casefold())
+    return "".join(
+        character
+        for character in normalized
+        if not unicodedata.combining(character)
+    )
+
+
+def build_fts_trigram_query(terms: List[str]) -> Optional[str]:
+    """Build a safe FTS5 trigram query for searchable-length terms.
+
+    The trigram tokenizer matches quoted terms anywhere inside a token, so
+    ``hot`` matches ``photo.jpg``.  Terms shorter than three Unicode code
+    points cannot produce a trigram and are handled separately with a
+    pre-normalized ``instr()`` predicate in :meth:`Database._search`.
+    """
+    searchable_terms = [
+        term for term in terms if len(term) >= TRIGRAM_MIN_LENGTH
+    ]
+    if not searchable_terms:
         return None
 
-    escaped_tokens = [token.replace('"', '""') for token in tokens]
-    return " AND ".join(f'"{token}"*' for token in escaped_tokens)
+    escaped_terms = [term.replace('"', '""') for term in searchable_terms]
+    return " AND ".join(f'"{term}"' for term in escaped_terms)
 
 
 class Database:
@@ -44,15 +73,21 @@ class Database:
         os.makedirs(parent_dir, exist_ok=True)
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            # Keep schema creation and upgrades atomic. If rebuilding the FTS
+            # index fails (for example because the disk is full), reopening
+            # the previous application version still sees its original index.
+            cursor.execute("BEGIN IMMEDIATE")
             
             # Main files table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS files (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    device_serial TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    path TEXT NOT NULL,
-                    size INTEGER DEFAULT 0,
+                        device_serial TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        name_normalized TEXT NOT NULL DEFAULT '',
+                        path_normalized TEXT NOT NULL DEFAULT '',
+                        size INTEGER DEFAULT 0,
                     modified TEXT,
                     is_dir INTEGER DEFAULT 0,
                     extension TEXT,
@@ -75,41 +110,6 @@ class Database:
                 ON files(extension)
             ''')
             
-            # FTS5 virtual table for full-text search
-            cursor.execute('''
-                CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
-                    name,
-                    path,
-                    content='files',
-                    content_rowid='id',
-                    tokenize='unicode61'
-                )
-            ''')
-            
-            # Triggers to keep FTS in sync
-            cursor.execute('''
-                CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
-                    INSERT INTO files_fts(rowid, name, path) 
-                    VALUES (new.id, new.name, new.path);
-                END
-            ''')
-            
-            cursor.execute('''
-                CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
-                    INSERT INTO files_fts(files_fts, rowid, name, path) 
-                    VALUES ('delete', old.id, old.name, old.path);
-                END
-            ''')
-            
-            cursor.execute('''
-                CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
-                    INSERT INTO files_fts(files_fts, rowid, name, path) 
-                    VALUES ('delete', old.id, old.name, old.path);
-                    INSERT INTO files_fts(rowid, name, path) 
-                    VALUES (new.id, new.name, new.path);
-                END
-            ''')
-            
             # Devices table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS devices (
@@ -119,14 +119,114 @@ class Database:
                     file_count INTEGER DEFAULT 0
                 )
             ''')
-            
+
+            self._ensure_normalized_columns(cursor)
+            self._ensure_trigram_index(cursor)
+
             conn.commit()
+
+    def _ensure_normalized_columns(self, cursor: sqlite3.Cursor):
+        """Add and populate search-normalized columns on legacy databases."""
+        cursor.execute("PRAGMA table_info(files)")
+        columns = {row[1] for row in cursor.fetchall()}
+        added_column = False
+
+        if "name_normalized" not in columns:
+            cursor.execute(
+                "ALTER TABLE files ADD COLUMN "
+                "name_normalized TEXT NOT NULL DEFAULT ''"
+            )
+            added_column = True
+        if "path_normalized" not in columns:
+            cursor.execute(
+                "ALTER TABLE files ADD COLUMN "
+                "path_normalized TEXT NOT NULL DEFAULT ''"
+            )
+            added_column = True
+
+        if added_column:
+            cursor.execute('''
+                UPDATE files
+                SET name_normalized = unicode_search_normalize(name),
+                    path_normalized = unicode_search_normalize(path)
+            ''')
+
+    def _ensure_trigram_index(self, cursor: sqlite3.Cursor):
+        """Create or migrate the external-content FTS index to trigram.
+
+        Releases through v0.1.3 created an unversioned ``unicode61`` FTS
+        table.  Replacing only the virtual table and its triggers preserves the
+        regular ``files`` rows, then ``rebuild`` repopulates the new trigram
+        index from that content table.
+        """
+        cursor.execute("PRAGMA user_version")
+        schema_version = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'files_fts'"
+        )
+        row = cursor.fetchone()
+        fts_sql = (row[0] or "").lower() if row else ""
+        needs_rebuild = (
+            schema_version < SCHEMA_VERSION
+            or "trigram" not in fts_sql
+            or "remove_diacritics 1" not in fts_sql
+        )
+
+        if needs_rebuild:
+            for trigger_name in ("files_ai", "files_ad", "files_au"):
+                cursor.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
+            cursor.execute("DROP TABLE IF EXISTS files_fts")
+
+        cursor.execute(f'''
+            CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
+                name,
+                path,
+                content='files',
+                content_rowid='id',
+                tokenize='{TRIGRAM_TOKENIZER}'
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
+                INSERT INTO files_fts(rowid, name, path)
+                VALUES (new.id, new.name, new.path);
+            END
+        ''')
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
+                INSERT INTO files_fts(files_fts, rowid, name, path)
+                VALUES ('delete', old.id, old.name, old.path);
+            END
+        ''')
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
+                INSERT INTO files_fts(files_fts, rowid, name, path)
+                VALUES ('delete', old.id, old.name, old.path);
+                INSERT INTO files_fts(rowid, name, path)
+                VALUES (new.id, new.name, new.path);
+            END
+        ''')
+
+        if needs_rebuild:
+            cursor.execute("INSERT INTO files_fts(files_fts) VALUES ('rebuild')")
+
+        cursor.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     
     @contextmanager
     def _get_connection(self):
         """Get a database connection."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.create_function(
+            "unicode_search_normalize",
+            1,
+            lambda value: normalize_short_search_text(value)
+            if isinstance(value, str)
+            else "",
+            deterministic=True,
+        )
         try:
             yield conn
         finally:
@@ -179,18 +279,29 @@ class Database:
                     batch = files[start:start + batch_size]
                     data = [
                         (
-                            device_serial, name, path, size, modified,
-                            is_dir, extension, now
+                            device_serial,
+                            name,
+                            path,
+                            normalize_short_search_text(name),
+                            normalize_short_search_text(path),
+                            size,
+                            modified,
+                            is_dir,
+                            extension,
+                            now,
                         )
                         for name, path, size, modified, is_dir, extension in batch
                     ]
                     cursor.executemany('''
                         INSERT INTO files
-                        (device_serial, name, path, size, modified, is_dir,
-                         extension, indexed_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (device_serial, name, path, name_normalized,
+                         path_normalized, size, modified, is_dir, extension,
+                         indexed_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(device_serial, path) DO UPDATE SET
                             name = excluded.name,
+                            name_normalized = excluded.name_normalized,
+                            path_normalized = excluded.path_normalized,
                             size = excluded.size,
                             modified = excluded.modified,
                             is_dir = excluded.is_dir,
@@ -242,14 +353,26 @@ class Database:
             
             # Prepare data with device serial and timestamp
             data = [
-                (device_serial, name, path, size, modified, is_dir, ext, now)
+                (
+                    device_serial,
+                    name,
+                    path,
+                    normalize_short_search_text(name),
+                    normalize_short_search_text(path),
+                    size,
+                    modified,
+                    is_dir,
+                    ext,
+                    now,
+                )
                 for name, path, size, modified, is_dir, ext in files
             ]
             
             cursor.executemany('''
-                INSERT OR REPLACE INTO files 
-                (device_serial, name, path, size, modified, is_dir, extension, indexed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO files
+                (device_serial, name, path, name_normalized, path_normalized,
+                 size, modified, is_dir, extension, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', data)
             
             conn.commit()
@@ -308,12 +431,16 @@ class Database:
             List of file dictionaries
         """
         query = query.strip()
-        fts_query = build_fts_prefix_query(query) if query else None
+        terms = extract_search_terms(query) if query else []
+        fts_query = build_fts_trigram_query(terms)
+        short_terms = [
+            term for term in terms if len(term) < TRIGRAM_MIN_LENGTH
+        ]
 
-        # Punctuation-only input has no searchable FTS5 tokens. Return an
+        # Punctuation-only input has no searchable literal terms. Return an
         # empty result rather than passing invalid syntax to MATCH or treating
         # the input as an empty query that displays every indexed file.
-        if query and not fts_query:
+        if query and not terms:
             return []
 
         with self._get_connection() as conn:
@@ -336,21 +463,43 @@ class Database:
                 params.append(limit)
                 
             else:
-                # Use FTS5 for search
+                # Trigram FTS provides arbitrary substring matching for terms
+                # of at least three code points. Shorter terms use the regular
+                # content table with pre-normalized Unicode instr() checks.
                 sql = '''
-                    SELECT f.id, f.name, f.path, f.size, f.modified, f.is_dir, f.extension
+                    SELECT f.id, f.name, f.path, f.size, f.modified,
+                           f.is_dir, f.extension
                     FROM files f
-                    INNER JOIN files_fts fts ON f.id = fts.rowid
-                    WHERE f.device_serial = ?
-                    AND files_fts MATCH ?
                 '''
-                params = [device_serial, fts_query]
+                params = [device_serial]
+
+                if fts_query:
+                    sql += " INNER JOIN files_fts fts ON f.id = fts.rowid"
+
+                sql += " WHERE f.device_serial = ?"
+
+                if fts_query:
+                    sql += " AND files_fts MATCH ?"
+                    params.append(fts_query)
+
+                for term in short_terms:
+                    sql += '''
+                        AND (
+                            instr(f.name_normalized, ?) > 0
+                            OR instr(f.path_normalized, ?) > 0
+                        )
+                    '''
+                    folded_term = normalize_short_search_text(term)
+                    params.extend((folded_term, folded_term))
                 
                 if extension_filter:
                     sql += " AND f.extension = ?"
                     params.append(extension_filter.lower())
                 
-                sql += " ORDER BY rank LIMIT ?"
+                if fts_query:
+                    sql += " ORDER BY fts.rank, f.name COLLATE NOCASE LIMIT ?"
+                else:
+                    sql += " ORDER BY f.name COLLATE NOCASE LIMIT ?"
                 params.append(limit)
 
             cursor.execute(sql, params)

@@ -4,6 +4,23 @@ All notable changes to Android Everything are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Add true case-insensitive substring matching for indexed file names and
+  Android paths using the SQLite FTS5 trigram tokenizer.
+- Support one- and two-character substring searches with a Unicode-aware
+  fallback while retaining safe handling of FTS5 punctuation and operators.
+
+### Changed
+
+- Automatically migrate the existing `unicode61` search index to the trigram
+  schema without discarding indexed file metadata.
+
+### Tests
+
+- Add coverage for middle-of-name and middle-of-path matching, mixed long and
+  short search terms, and migration from the v0.1.3 database schema.
+
 ## [0.1.3] - 2026-08-20
 
 ### Fixed

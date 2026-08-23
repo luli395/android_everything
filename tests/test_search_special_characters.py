@@ -1,10 +1,17 @@
 import sqlite3
 import unittest
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
-from database import Database, SearchQueryError, build_fts_prefix_query
+from database import (
+    SCHEMA_VERSION,
+    Database,
+    SearchQueryError,
+    build_fts_trigram_query,
+    extract_search_terms,
+)
 from ui.main_window import MainWindow
 
 
@@ -16,6 +23,8 @@ FILES = [
     ("report AND review.txt", "/docs/report AND review.txt", 50, None, 0, ".txt"),
     ("literal [brackets].txt", "/docs/literal [brackets].txt", 60, None, 0, ".txt"),
     ("photo album.jpg", "/photos/photo album.jpg", 70, None, 0, ".jpg"),
+    ("Résumé.txt", "/docs/Résumé.txt", 80, None, 0, ".txt"),
+    ("旅行照片.jpg", "/photos/旅行照片.jpg", 90, None, 0, ".jpg"),
 ]
 
 
@@ -63,11 +72,39 @@ class SpecialCharacterSearchTests(unittest.TestCase):
             with self.subTest(query=query):
                 self.assertEqual(self.db.search("device-1", query), [])
 
-    def test_query_builder_quotes_every_prefix_token(self):
+    def test_trigram_query_builder_omits_short_terms(self):
+        terms = extract_search_terms('a report OR "draft"')
         self.assertEqual(
-            build_fts_prefix_query('report AND "draft"'),
-            '"report"* AND "AND"* AND "draft"*',
+            build_fts_trigram_query(terms),
+            '"report" AND "draft"',
         )
+
+    def test_middle_substrings_match_names_and_paths(self):
+        cases = [
+            ("hoto", "photo album.jpg"),
+            ("HOTO", "photo album.jpg"),
+            ("oto", "photo album.jpg"),
+            ("lbum", "photo album.jpg"),
+            ("hotos", "photo album.jpg"),
+        ]
+
+        for query, expected_name in cases:
+            with self.subTest(query=query):
+                self.assertIn(expected_name, self.search_names(query))
+
+    def test_one_and_two_character_terms_use_literal_substring_fallback(self):
+        self.assertIn("photo album.jpg", self.search_names("h"))
+        self.assertIn("photo album.jpg", self.search_names("HO"))
+        self.assertIn("Résumé.txt", self.search_names("RÉ"))
+        self.assertIn("Résumé.txt", self.search_names("re"))
+        self.assertIn("旅行照片.jpg", self.search_names("照片"))
+
+    def test_trigram_search_remains_case_and_diacritic_insensitive(self):
+        self.assertIn("Résumé.txt", self.search_names("RESUME"))
+
+    def test_long_and_short_terms_are_combined_with_and_semantics(self):
+        self.assertIn("photo album.jpg", self.search_names("oto AL"))
+        self.assertNotIn("photo album.jpg", self.search_names("oto zz"))
 
     def test_sqlite_operational_error_is_wrapped_for_the_ui(self):
         with patch(
@@ -99,6 +136,80 @@ class SpecialCharacterSearchTests(unittest.TestCase):
         window.file_list.clear.assert_called_once_with()
         self.assertEqual(window.count_var.value, "Search unavailable")
         self.assertIn("Search could not be completed", window.status_var.value)
+
+
+class TrigramMigrationTests(unittest.TestCase):
+    def test_legacy_unicode61_index_is_rebuilt_without_losing_files(self):
+        with TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "legacy.db"
+            with closing(sqlite3.connect(db_path)) as conn, conn:
+                conn.executescript('''
+                    CREATE TABLE files (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        device_serial TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        size INTEGER DEFAULT 0,
+                        modified TEXT,
+                        is_dir INTEGER DEFAULT 0,
+                        extension TEXT,
+                        indexed_at TEXT NOT NULL,
+                        UNIQUE(device_serial, path)
+                    );
+                    CREATE VIRTUAL TABLE files_fts USING fts5(
+                        name,
+                        path,
+                        content='files',
+                        content_rowid='id',
+                        tokenize='unicode61'
+                    );
+                    CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
+                        INSERT INTO files_fts(rowid, name, path)
+                        VALUES (new.id, new.name, new.path);
+                    END;
+                ''')
+                conn.execute('''
+                    INSERT INTO files (
+                        device_serial, name, path, size, modified, is_dir,
+                        extension, indexed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    "legacy-device",
+                    "photo.jpg",
+                    "/DCIM/Camera/photo.jpg",
+                    100,
+                    None,
+                    0,
+                    ".jpg",
+                    "2026-08-23T00:00:00",
+                ))
+
+            db = Database(str(db_path))
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                fts_sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name = 'files_fts'"
+                ).fetchone()[0]
+                schema_version = conn.execute(
+                    "PRAGMA user_version"
+                ).fetchone()[0]
+                file_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(files)")
+                }
+
+            self.assertIn("trigram", fts_sql.lower())
+            self.assertIn("remove_diacritics 1", fts_sql.lower())
+            self.assertEqual(schema_version, SCHEMA_VERSION)
+            self.assertIn("name_normalized", file_columns)
+            self.assertIn("path_normalized", file_columns)
+            self.assertEqual(
+                [row["name"] for row in db.search("legacy-device", "hoto")],
+                ["photo.jpg"],
+            )
+            self.assertEqual(
+                [row["name"] for row in db.search("legacy-device", "HO")],
+                ["photo.jpg"],
+            )
 
 
 if __name__ == "__main__":

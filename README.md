@@ -57,9 +57,9 @@ endorsed by voidtools.
 
 ## Highlights
 
-- **Everything-style search on Windows** with responsive, search-as-you-type results
+- **True substring search** across names and Android paths, so `hot` can match `photo.jpg`
 - **Reusable local index** of names, paths, sizes, extensions, and modification times
-- **Safe SQLite FTS5 queries** for spaces, quotes, parentheses, hyphens, and other special characters
+- **Safe SQLite FTS5 trigram queries** for spaces, quotes, parentheses, hyphens, and other special characters
 - **Atomic indexing** that preserves the previous usable index if a refresh fails or is cancelled
 - **Multi-storage discovery** for internal storage, SD cards, and common external-storage paths
 - **Explicit device binding** so indexing, pulling, and deleting remain tied to the selected ADB serial
