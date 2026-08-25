@@ -12,9 +12,9 @@ from contextlib import contextmanager
 from config import DATABASE_PATH
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TRIGRAM_MIN_LENGTH = 3
-TRIGRAM_TOKENIZER = "trigram case_sensitive 0 remove_diacritics 1"
+TRIGRAM_TOKENIZER = "trigram"
 
 
 class SearchQueryError(RuntimeError):
@@ -32,8 +32,8 @@ def extract_search_terms(query: str) -> List[str]:
     return re.findall(r"[^\W_]+", query, flags=re.UNICODE)
 
 
-def normalize_short_search_text(value: str) -> str:
-    """Case-fold text and remove combining marks for short-term searches."""
+def normalize_search_text(value: str) -> str:
+    """Case-fold text and remove combining marks for consistent searching."""
     normalized = unicodedata.normalize("NFKD", value.casefold())
     return "".join(
         character
@@ -45,13 +45,17 @@ def normalize_short_search_text(value: str) -> str:
 def build_fts_trigram_query(terms: List[str]) -> Optional[str]:
     """Build a safe FTS5 trigram query for searchable-length terms.
 
-    The trigram tokenizer matches quoted terms anywhere inside a token, so
-    ``hot`` matches ``photo.jpg``.  Terms shorter than three Unicode code
-    points cannot produce a trigram and are handled separately with a
-    pre-normalized ``instr()`` predicate in :meth:`Database._search`.
+    Terms are normalized before being quoted because the FTS table indexes the
+    same normalized text.  This keeps case and diacritic behavior consistent
+    across SQLite versions, including the SQLite 3.35 bundled with Python 3.8.
+    Terms shorter than three normalized Unicode code points cannot produce a
+    trigram and are handled separately with ``instr()``.
     """
+    normalized_terms = [normalize_search_text(term) for term in terms]
     searchable_terms = [
-        term for term in terms if len(term) >= TRIGRAM_MIN_LENGTH
+        term
+        for term in normalized_terms
+        if len(term) >= TRIGRAM_MIN_LENGTH
     ]
     if not searchable_terms:
         return None
@@ -170,7 +174,8 @@ class Database:
         needs_rebuild = (
             schema_version < SCHEMA_VERSION
             or "trigram" not in fts_sql
-            or "remove_diacritics 1" not in fts_sql
+            or "name_normalized" not in fts_sql
+            or "path_normalized" not in fts_sql
         )
 
         if needs_rebuild:
@@ -180,8 +185,8 @@ class Database:
 
         cursor.execute(f'''
             CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
-                name,
-                path,
+                name_normalized,
+                path_normalized,
                 content='files',
                 content_rowid='id',
                 tokenize='{TRIGRAM_TOKENIZER}'
@@ -190,22 +195,36 @@ class Database:
 
         cursor.execute('''
             CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
-                INSERT INTO files_fts(rowid, name, path)
-                VALUES (new.id, new.name, new.path);
+                INSERT INTO files_fts(
+                    rowid, name_normalized, path_normalized
+                ) VALUES (
+                    new.id, new.name_normalized, new.path_normalized
+                );
             END
         ''')
         cursor.execute('''
             CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
-                INSERT INTO files_fts(files_fts, rowid, name, path)
-                VALUES ('delete', old.id, old.name, old.path);
+                INSERT INTO files_fts(
+                    files_fts, rowid, name_normalized, path_normalized
+                ) VALUES (
+                    'delete', old.id,
+                    old.name_normalized, old.path_normalized
+                );
             END
         ''')
         cursor.execute('''
             CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN
-                INSERT INTO files_fts(files_fts, rowid, name, path)
-                VALUES ('delete', old.id, old.name, old.path);
-                INSERT INTO files_fts(rowid, name, path)
-                VALUES (new.id, new.name, new.path);
+                INSERT INTO files_fts(
+                    files_fts, rowid, name_normalized, path_normalized
+                ) VALUES (
+                    'delete', old.id,
+                    old.name_normalized, old.path_normalized
+                );
+                INSERT INTO files_fts(
+                    rowid, name_normalized, path_normalized
+                ) VALUES (
+                    new.id, new.name_normalized, new.path_normalized
+                );
             END
         ''')
 
@@ -222,7 +241,7 @@ class Database:
         conn.create_function(
             "unicode_search_normalize",
             1,
-            lambda value: normalize_short_search_text(value)
+            lambda value: normalize_search_text(value)
             if isinstance(value, str)
             else "",
             deterministic=True,
@@ -282,8 +301,8 @@ class Database:
                             device_serial,
                             name,
                             path,
-                            normalize_short_search_text(name),
-                            normalize_short_search_text(path),
+                            normalize_search_text(name),
+                            normalize_search_text(path),
                             size,
                             modified,
                             is_dir,
@@ -357,8 +376,8 @@ class Database:
                     device_serial,
                     name,
                     path,
-                    normalize_short_search_text(name),
-                    normalize_short_search_text(path),
+                    normalize_search_text(name),
+                    normalize_search_text(path),
                     size,
                     modified,
                     is_dir,
@@ -432,9 +451,14 @@ class Database:
         """
         query = query.strip()
         terms = extract_search_terms(query) if query else []
-        fts_query = build_fts_trigram_query(terms)
+        normalized_terms = [
+            normalize_search_text(term) for term in terms
+        ]
+        fts_query = build_fts_trigram_query(normalized_terms)
         short_terms = [
-            term for term in terms if len(term) < TRIGRAM_MIN_LENGTH
+            term
+            for term in normalized_terms
+            if len(term) < TRIGRAM_MIN_LENGTH
         ]
 
         # Punctuation-only input has no searchable literal terms. Return an
@@ -489,8 +513,7 @@ class Database:
                             OR instr(f.path_normalized, ?) > 0
                         )
                     '''
-                    folded_term = normalize_short_search_text(term)
-                    params.extend((folded_term, folded_term))
+                    params.extend((term, term))
                 
                 if extension_filter:
                     sql += " AND f.extension = ?"

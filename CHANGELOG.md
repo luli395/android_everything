@@ -4,6 +4,8 @@ All notable changes to Android Everything are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-25
+
 ### Added
 
 - Add true case-insensitive substring matching for indexed file names and
@@ -15,6 +17,8 @@ All notable changes to Android Everything are documented in this file.
 
 - Automatically migrate the existing `unicode61` search index to the trigram
   schema without discarding indexed file metadata.
+- Normalize indexed search text in application code so substring matching
+  remains case- and diacritic-insensitive on every supported Python version.
 
 ### Tests
 
@@ -91,7 +95,8 @@ All notable changes to Android Everything are documented in this file.
 - Keep the main window usable when ADB is not installed and display setup guidance instead of exiting.
 - Report packaged startup errors through a GUI dialog and persistent log rather than a console prompt.
 
-[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/luli395/android_everything/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/luli395/android_everything/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/luli395/android_everything/releases/tag/v0.1.2
 [0.1.1]: https://github.com/luli395/android_everything/releases/tag/v0.1.1

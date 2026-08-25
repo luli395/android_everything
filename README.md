@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/luli395/android_everything/releases/download/v0.1.3/AndroidEverything-v0.1.3-windows.zip"><img alt="Download Android Everything v0.1.3 for Windows" src="https://img.shields.io/badge/Download_for_Windows-v0.1.3-e94560?style=for-the-badge&amp;logo=windows11&amp;logoColor=white"></a>
+  <a href="https://github.com/luli395/android_everything/releases/download/v0.1.4/AndroidEverything-v0.1.4-windows.zip"><img alt="Download Android Everything v0.1.4 for Windows" src="https://img.shields.io/badge/Download_for_Windows-v0.1.4-e94560?style=for-the-badge&amp;logo=windows11&amp;logoColor=white"></a>
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@ without reopening folders across the phone for every search.
 
 ## Start searching in three steps
 
-1. **Download and extract** the complete [Windows ZIP for v0.1.3](https://github.com/luli395/android_everything/releases/download/v0.1.3/AndroidEverything-v0.1.3-windows.zip).
+1. **Download and extract** the complete [Windows ZIP for v0.1.4](https://github.com/luli395/android_everything/releases/download/v0.1.4/AndroidEverything-v0.1.4-windows.zip).
 2. **Connect and authorize** the phone: enable USB debugging, connect it over USB, and approve the computer on the device.
 3. **Run and search**: start `AndroidEverything.exe`, select the device, click **Index**, and begin typing.
 
@@ -87,18 +87,18 @@ flowchart LR
 
 ## Download and verify
 
-Current release: **v0.1.3**
+Current release: **v0.1.4**
 
-- [Complete Windows ZIP](https://github.com/luli395/android_everything/releases/download/v0.1.3/AndroidEverything-v0.1.3-windows.zip)
-- [ZIP SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.3/AndroidEverything-v0.1.3-windows-SHA256.txt)
-- [Release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.3)
+- [Complete Windows ZIP](https://github.com/luli395/android_everything/releases/download/v0.1.4/AndroidEverything-v0.1.4-windows.zip)
+- [ZIP SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.4/AndroidEverything-v0.1.4-windows-SHA256.txt)
+- [Release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.4)
 
 Place the ZIP and checksum file in the same directory, then verify them in
 PowerShell:
 
 ```powershell
-$expected = (Get-Content .\AndroidEverything-v0.1.3-windows-SHA256.txt).Split()[0]
-$actual = (Get-FileHash .\AndroidEverything-v0.1.3-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\AndroidEverything-v0.1.4-windows-SHA256.txt).Split()[0]
+$actual = (Get-FileHash .\AndroidEverything-v0.1.4-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
 $actual -eq $expected
 ```
 

@@ -12,10 +12,16 @@ $VenvDir = Join-Path $ProjectRoot ".venv"
 $Python = Join-Path $VenvDir "Scripts\python.exe"
 $DistDir = Join-Path $ProjectRoot "dist"
 $ExePath = Join-Path $DistDir "AndroidEverything.exe"
-$ChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.3-SHA256.txt"
-$ZipPath = Join-Path $DistDir "AndroidEverything-v0.1.3-windows.zip"
-$ZipChecksumPath = Join-Path $DistDir "AndroidEverything-v0.1.3-windows-SHA256.txt"
-$VersionFile = Join-Path $ProjectRoot "packaging\windows-version-info.txt"
+$VersionSource = Get-Content -LiteralPath (Join-Path $ProjectRoot "version.py") -Raw
+$VersionMatch = [regex]::Match($VersionSource, '__version__\s*=\s*"([^"]+)"')
+if (-not $VersionMatch.Success) {
+    throw "Could not read __version__ from version.py"
+}
+$Version = $VersionMatch.Groups[1].Value
+$ChecksumPath = Join-Path $DistDir "AndroidEverything-v$Version-SHA256.txt"
+$ZipPath = Join-Path $DistDir "AndroidEverything-v$Version-windows.zip"
+$ZipChecksumPath = Join-Path $DistDir "AndroidEverything-v$Version-windows-SHA256.txt"
+$WindowsVersionFile = Join-Path $ProjectRoot "packaging\windows-version-info.txt"
 
 Push-Location $ProjectRoot
 try {
@@ -40,7 +46,7 @@ try {
         --windowed `
         --name AndroidEverything `
         --specpath build `
-        --version-file $VersionFile `
+        --version-file $WindowsVersionFile `
         main.py
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 
@@ -89,7 +95,7 @@ try {
 
     Compress-Archive -LiteralPath $PackageFiles -DestinationPath $ZipPath -CompressionLevel Optimal
     $ZipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ZipPath).Hash.ToLowerInvariant()
-    "$ZipHash  AndroidEverything-v0.1.3-windows.zip" | `
+    "$ZipHash  AndroidEverything-v$Version-windows.zip" | `
         Set-Content -LiteralPath $ZipChecksumPath -Encoding ascii
 
     Write-Host "Built: $ExePath"

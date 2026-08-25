@@ -11,7 +11,7 @@ from version import __version__
 
 class ReleaseReadinessTests(unittest.TestCase):
     def test_version_matches_current_release(self):
-        self.assertEqual(__version__, "0.1.3")
+        self.assertEqual(__version__, "0.1.4")
 
     def test_packaged_adb_next_to_executable_is_detected(self):
         with TemporaryDirectory() as temp_dir, patch.dict(

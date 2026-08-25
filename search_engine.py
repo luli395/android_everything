@@ -25,7 +25,7 @@ class SearchEngine:
         
         Args:
             device_serial: Device to search
-            query: Search query (supports prefix matching)
+            query: Search query (supports case-insensitive substring matching)
             extension_filter: Optional extension filter (e.g., ".jpg")
             limit: Maximum results to return
             

@@ -79,6 +79,12 @@ class SpecialCharacterSearchTests(unittest.TestCase):
             '"report" AND "draft"',
         )
 
+    def test_trigram_query_builder_normalizes_diacritics(self):
+        self.assertEqual(
+            build_fts_trigram_query(["Résumé"]),
+            '"resume"',
+        )
+
     def test_middle_substrings_match_names_and_paths(self):
         cases = [
             ("hoto", "photo album.jpg"),
@@ -198,7 +204,8 @@ class TrigramMigrationTests(unittest.TestCase):
                 }
 
             self.assertIn("trigram", fts_sql.lower())
-            self.assertIn("remove_diacritics 1", fts_sql.lower())
+            self.assertIn("name_normalized", fts_sql.lower())
+            self.assertIn("path_normalized", fts_sql.lower())
             self.assertEqual(schema_version, SCHEMA_VERSION)
             self.assertIn("name_normalized", file_columns)
             self.assertIn("path_normalized", file_columns)
