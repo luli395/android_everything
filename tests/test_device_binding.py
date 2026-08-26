@@ -2,6 +2,7 @@ import unittest
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
+from device_mutation import DeviceMutationCoordinator
 from ui.main_window import MainWindow
 
 
@@ -74,6 +75,10 @@ def make_window():
     window.status_var = FakeVar()
     window._current_device = "device-A"
     window._device_operation_count = 0
+    window._delete_in_progress = False
+    window.mutation_coordinator = DeviceMutationCoordinator()
+    window.indexer = None
+    window.index_btn = FakeControl()
     return window
 
 
@@ -122,7 +127,6 @@ class DeviceBindingTests(unittest.TestCase):
         }]
         window.search_engine = Mock()
         window._do_search = Mock()
-        database = Mock()
 
         with patch(
             "ui.main_window.messagebox.askyesno",
@@ -130,8 +134,9 @@ class DeviceBindingTests(unittest.TestCase):
         ), patch(
             "ui.main_window.threading.Thread",
             DeferredThread,
-        ), patch("database.get_database", return_value=database):
+        ):
             window._delete_selected()
+            self.assertEqual(window.index_btn.states, ["disabled"])
             window._current_device = "device-B"
             DeferredThread.instances[0].run()
 
@@ -139,12 +144,40 @@ class DeviceBindingTests(unittest.TestCase):
             "/sdcard/old.txt",
             device_serial="device-A",
         )
-        database.delete_files.assert_called_once_with(
+        window.search_engine.db.delete_files.assert_called_once_with(
             "device-A",
             ["/sdcard/old.txt"],
         )
         window._do_search.assert_not_called()
         self.assertEqual(window.device_combo.states, ["disabled", "readonly"])
+        self.assertEqual(window.index_btn.states, ["disabled", "normal"])
+        self.assertFalse(window._delete_in_progress)
+
+    def test_delete_is_rejected_while_indexing(self):
+        window = make_window()
+        window.indexer = Mock()
+        window.indexer.is_indexing = True
+        window.file_list = Mock()
+
+        with patch("ui.main_window.messagebox.showwarning") as warning:
+            window._delete_selected()
+
+        window.file_list.get_selected_files.assert_not_called()
+        window.adb.delete_file.assert_not_called()
+        warning.assert_called_once()
+        self.assertIn("Stop indexing", window.status_var.value)
+
+    def test_indexing_is_rejected_while_deletion_is_active(self):
+        window = make_window()
+        window._delete_in_progress = True
+        window.indexer = Mock()
+        window.indexer.is_indexing = False
+        window.progress = FakeProgress()
+
+        window._start_indexing()
+
+        window.indexer.index_device.assert_not_called()
+        self.assertIn("active deletion", window.status_var.value)
 
     def test_indexing_callback_keeps_the_starting_device_serial(self):
         window = make_window()

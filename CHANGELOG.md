@@ -4,6 +4,22 @@ All notable changes to Android Everything are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-26
+
+### Fixed
+
+- Serialize indexing and deletion for each device so an in-flight index
+  snapshot cannot restore a path that was deleted from the phone.
+- Disable index startup while deletion is active and reject deletion while an
+  index refresh is running.
+- Remove successfully deleted paths from SQLite before releasing the device
+  mutation lock.
+
+### Tests
+
+- Add a deterministic concurrency regression test covering the sequence where
+  indexing captures a file immediately before the user deletes it.
+
 ## [0.1.4] - 2026-08-25
 
 ### Added
@@ -95,7 +111,8 @@ All notable changes to Android Everything are documented in this file.
 - Keep the main window usable when ADB is not installed and display setup guidance instead of exiting.
 - Report packaged startup errors through a GUI dialog and persistent log rather than a console prompt.
 
-[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/luli395/android_everything/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/luli395/android_everything/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/luli395/android_everything/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/luli395/android_everything/releases/tag/v0.1.2

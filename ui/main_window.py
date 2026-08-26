@@ -19,6 +19,10 @@ from adb_wrapper import get_adb, ADBWrapper, DeviceInfo, ADBError
 from file_indexer import FileIndexer
 from search_engine import get_search_engine, SearchEngine
 from database import SearchQueryError
+from device_mutation import (
+    delete_device_paths,
+    get_device_mutation_coordinator,
+)
 from path_utils import (
     available_download_path,
     cached_download_path,
@@ -50,12 +54,17 @@ class MainWindow:
         # Initialize local components even when ADB is not installed, so the
         # packaged application can still open and explain how to configure it.
         self.search_engine = get_search_engine()
+        self.mutation_coordinator = get_device_mutation_coordinator()
         self.adb: Optional[ADBWrapper] = None
         self.indexer: Optional[FileIndexer] = None
         self._adb_error: Optional[str] = None
         try:
             self.adb = get_adb()
-            self.indexer = FileIndexer(adb=self.adb, db=self.search_engine.db)
+            self.indexer = FileIndexer(
+                adb=self.adb,
+                db=self.search_engine.db,
+                mutation_coordinator=self.mutation_coordinator,
+            )
         except ADBError as e:
             self._adb_error = str(e)
         
@@ -64,6 +73,7 @@ class MainWindow:
         self._current_device: Optional[str] = None
         self._search_timer: Optional[str] = None
         self._device_operation_count = 0
+        self._delete_in_progress = False
         
         # Build UI
         self._setup_ui()
@@ -437,6 +447,12 @@ class MainWindow:
         if not self._current_device:
             messagebox.showwarning("No Device", "Please connect and select a device first.")
             return
+
+        if self._delete_in_progress:
+            self.status_var.set(
+                "Wait for the active deletion to finish before indexing."
+            )
+            return
         
         if self.indexer.is_indexing:
             self.indexer.cancel()
@@ -754,6 +770,21 @@ class MainWindow:
         if not self.adb or not device_serial:
             return
 
+        if self._delete_in_progress:
+            self.status_var.set("A deletion is already in progress.")
+            return
+
+        if self.indexer and self.indexer.is_indexing:
+            self.status_var.set(
+                "Stop indexing before deleting files from this device."
+            )
+            messagebox.showwarning(
+                "Indexing in Progress",
+                "Wait for indexing to finish or stop it before deleting files.",
+                parent=self.root,
+            )
+            return
+
         files = self.file_list.get_selected_files()
         if not files:
             return
@@ -767,30 +798,54 @@ class MainWindow:
             return
         
         self.status_var.set(f"Deleting {len(files)} files...")
+        self._delete_in_progress = True
+        self.index_btn.configure(state="disabled")
         
         def do_delete():
-            deleted = 0
-            deleted_paths = []
-            for file in files:
-                path = file.get("path", "")
-                if self.adb.delete_file(
-                    path,
-                    device_serial=device_serial,
-                ):
-                    deleted += 1
-                    deleted_paths.append(path)
+            try:
+                deleted_paths = delete_device_paths(
+                    self.adb,
+                    self.search_engine.db,
+                    self.mutation_coordinator,
+                    device_serial,
+                    (file.get("path", "") for file in files),
+                )
+            except Exception as error:
+                message = str(error)
+                self.root.after(
+                    0,
+                    lambda: self._on_delete_error(message),
+                )
+                return
             
             self.root.after(
                 0,
                 lambda: self._on_delete_complete(
                     device_serial,
-                    deleted,
+                    len(deleted_paths),
                     len(files),
                     deleted_paths,
                 ),
             )
         
-        self._start_device_worker(do_delete)
+        try:
+            self._start_device_worker(do_delete)
+        except Exception:
+            self._delete_in_progress = False
+            self.index_btn.configure(state="normal")
+            raise
+
+    def _on_delete_error(self, error: str):
+        """Restore controls after a serialized deletion fails."""
+        self._end_device_operation()
+        self._delete_in_progress = False
+        self.index_btn.configure(state="normal")
+        self.status_var.set(f"Deletion failed: {error}")
+        messagebox.showerror(
+            "Delete Error",
+            f"The deletion could not be completed.\n\n{error}",
+            parent=self.root,
+        )
     
     def _on_delete_complete(
         self,
@@ -801,13 +856,13 @@ class MainWindow:
     ):
         """Handle delete completion."""
         self._end_device_operation()
+        self._delete_in_progress = False
+        self.index_btn.configure(state="normal")
         self.status_var.set(f"Deleted {deleted}/{total} files")
         
-        # Remove deleted files from database index
+        # The database rows were removed while the device mutation lock was
+        # still held. Invalidate cached queries only after that completes.
         if deleted_paths:
-            from database import get_database
-            db = get_database()
-            db.delete_files(device_serial, deleted_paths)
             self.search_engine.clear_cache()
         
         if deleted < total:

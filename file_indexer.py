@@ -9,6 +9,10 @@ from datetime import datetime
 
 from adb_wrapper import ADBError, ADBWrapper, FileInfo, get_adb
 from database import Database, get_database
+from device_mutation import (
+    DeviceMutationCoordinator,
+    get_device_mutation_coordinator,
+)
 from config import SCAN_PATHS
 
 
@@ -22,9 +26,17 @@ SCAN_COMPLETE_MARKER = "__ANDROID_EVERYTHING_SCAN_COMPLETE__="
 class FileIndexer:
     """Indexes files from Android device into the database."""
     
-    def __init__(self, adb: Optional[ADBWrapper] = None, db: Optional[Database] = None):
+    def __init__(
+        self,
+        adb: Optional[ADBWrapper] = None,
+        db: Optional[Database] = None,
+        mutation_coordinator: Optional[DeviceMutationCoordinator] = None,
+    ):
         self.adb = adb or get_adb()
         self.db = db or get_database()
+        self.mutation_coordinator = (
+            mutation_coordinator or get_device_mutation_coordinator()
+        )
         self._indexing = False
         self._cancel_requested = False
         self._current_thread: Optional[threading.Thread] = None
@@ -75,7 +87,17 @@ class FileIndexer:
                 cancelled_callback()
         
         def do_index():
+            device_lock = None
             try:
+                # Hold this lock from the first ADB read through the atomic
+                # database commit. A delete for the same device must therefore
+                # happen entirely before or entirely after this snapshot.
+                device_lock = self.mutation_coordinator.acquire(device_serial)
+
+                if self._cancel_requested:
+                    report_cancelled()
+                    return
+
                 scan_paths = requested_paths
                 if scan_paths is None:
                     scan_paths = self.adb.get_storage_paths(
@@ -189,6 +211,8 @@ class FileIndexer:
                 if error_callback:
                     error_callback(e)
             finally:
+                if device_lock is not None:
+                    self.mutation_coordinator.release(device_lock)
                 self._indexing = False
         
         # Start in background thread
