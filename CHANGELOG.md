@@ -4,6 +4,12 @@ All notable changes to Android Everything are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve remote recursive-scan diagnostics and accept a partial listing only
+  when every reported failure is an explicit `Permission denied` error for a
+  child directory of the requested scan root.
+
 ## [0.1.5] - 2026-08-26
 
 ### Fixed

@@ -2,6 +2,8 @@
 File indexer for scanning and indexing Android device files.
 """
 import os
+import posixpath
+import re
 import shlex
 import threading
 from typing import Callable, Optional, List
@@ -21,6 +23,18 @@ class IndexingCancelled(Exception):
 
 
 SCAN_COMPLETE_MARKER = "__ANDROID_EVERYTHING_SCAN_COMPLETE__="
+SCAN_ERRORS_MARKER = "__ANDROID_EVERYTHING_SCAN_ERRORS__="
+
+
+_PERMISSION_DENIED_PATTERNS = (
+    re.compile(
+        r"^ls:\s+cannot open directory\s+(?P<path>.+):\s*"
+        r"Permission denied\s*$"
+    ),
+    re.compile(
+        r"^ls:\s+(?P<path>.+):\s*Permission denied\s*$"
+    ),
+)
 
 
 class FileIndexer:
@@ -238,14 +252,18 @@ class FileIndexer:
         
         # Recursive ls commonly returns 1 when Android denies access to a
         # protected child directory even though the accessible listing is
-        # complete and usable. Verify the root first, tolerate that partial
-        # status, and emit a sentinel so an interrupted ADB transport can never
-        # be mistaken for a completed scan.
+        # complete and usable. Preserve its remote stderr separately so that
+        # only that specific partial-failure case can be accepted. The
+        # sentinels also prevent an interrupted ADB transport from being
+        # mistaken for a completed scan.
         quoted_path = shlex.quote(path)
         cmd = (
-            f"if ! ls -ld {quoted_path} >/dev/null 2>&1; then exit 2; fi; "
-            f"ls -lR {quoted_path} 2>/dev/null; "
+            f"if ! ls -ld {quoted_path} >/dev/null; then exit 2; fi; "
+            "exec 3>&1; "
+            f"scan_errors=$(ls -lR {quoted_path} 2>&1 1>&3); "
             "scan_status=$?; "
+            "exec 3>&-; "
+            f"printf '\n{SCAN_ERRORS_MARKER}%s\n' \"$scan_errors\"; "
             f"printf '\n{SCAN_COMPLETE_MARKER}%s\n' \"$scan_status\"; "
             "exit 0"
         )
@@ -255,28 +273,37 @@ class FileIndexer:
             device_serial=device_serial,
         )
 
-        listing, marker, status_output = output.rpartition(SCAN_COMPLETE_MARKER)
+        scan_payload, marker, status_output = output.rpartition(
+            SCAN_COMPLETE_MARKER
+        )
         if not marker:
             raise ADBError(
                 "ADB scan ended before the completion marker was received"
             )
 
-        try:
-            scan_status = int(status_output.splitlines()[0].strip())
-        except (IndexError, ValueError) as error:
-            raise ADBError("ADB scan returned an invalid completion status") from error
+        status_text = status_output.strip()
+        if not re.fullmatch(r"\d+", status_text):
+            raise ADBError("ADB scan returned an invalid completion status")
+        scan_status = int(status_text)
 
-        if scan_status not in (0, 1):
+        listing, errors_marker, scan_errors = scan_payload.rpartition(
+            SCAN_ERRORS_MARKER
+        )
+        if not errors_marker:
             raise ADBError(
-                f"Android file listing failed with exit code {scan_status}"
+                "ADB scan ended before the remote error marker was received"
             )
 
-        # Status 1 represents inaccessible child directories on common Android
-        # builds. An empty response with that status is not a usable scan.
+        listing = listing.rstrip("\r\n")
+        scan_errors = scan_errors.strip("\r\n")
+        self._validate_scan_errors(path, scan_status, scan_errors)
+
+        # Even an explicitly permitted partial failure must return a usable
+        # listing; otherwise replacing the previous index would lose data.
         if scan_status == 1 and not listing.strip():
             raise ADBError("Android file listing failed without returning data")
 
-        output = listing.rstrip("\r\n")
+        output = listing
 
         current_dir = path
         lines = output.split('\n')
@@ -335,6 +362,95 @@ class FileIndexer:
                         ))
 
         return files
+
+    @staticmethod
+    def _validate_scan_errors(
+        scan_path: str,
+        scan_status: int,
+        scan_errors: str,
+    ):
+        """Accept only explicit permission failures for scanned subfolders."""
+        error_lines = [
+            line.strip()
+            for line in scan_errors.splitlines()
+            if line.strip()
+        ]
+
+        if scan_status == 0:
+            if error_lines:
+                raise ADBError(
+                    "Android file listing reported unexpected remote error "
+                    f"output: {FileIndexer._format_scan_errors(error_lines)}"
+                )
+            return
+
+        if scan_status != 1:
+            detail = FileIndexer._format_scan_errors(error_lines)
+            message = (
+                f"Android file listing failed with exit code {scan_status}"
+            )
+            if detail:
+                message += f": {detail}"
+            raise ADBError(message)
+
+        if not error_lines or not all(
+            FileIndexer._is_permission_denied_child(scan_path, line)
+            for line in error_lines
+        ):
+            detail = FileIndexer._format_scan_errors(error_lines)
+            if not detail:
+                detail = "no remote error output"
+            raise ADBError(
+                "Android file listing failed; only explicit Permission denied "
+                "errors for child directories are allowed: "
+                f"{detail}"
+            )
+
+    @staticmethod
+    def _is_permission_denied_child(scan_path: str, error_line: str) -> bool:
+        """Return whether an ls diagnostic names a child of ``scan_path``."""
+        denied_path = None
+        for pattern in _PERMISSION_DENIED_PATTERNS:
+            match = pattern.fullmatch(error_line)
+            if match:
+                denied_path = match.group("path").strip()
+                break
+
+        if denied_path is None:
+            return False
+
+        if (
+            len(denied_path) >= 2
+            and denied_path[0] == denied_path[-1]
+            and denied_path[0] in ("'", '"')
+        ):
+            denied_path = denied_path[1:-1]
+
+        normalized_root = posixpath.normpath(scan_path)
+        normalized_denied = posixpath.normpath(denied_path)
+        if (
+            not normalized_root.startswith("/")
+            or not normalized_denied.startswith("/")
+        ):
+            return False
+
+        child_prefix = (
+            normalized_root
+            if normalized_root.endswith("/")
+            else normalized_root + "/"
+        )
+        return (
+            normalized_denied != normalized_root
+            and normalized_denied.startswith(child_prefix)
+        )
+
+    @staticmethod
+    def _format_scan_errors(error_lines: List[str]) -> str:
+        """Return bounded remote diagnostics suitable for the UI and logs."""
+        detail = " | ".join(error_lines)
+        if len(detail) > 500:
+            return detail[:497] + "..."
+        return detail
     
     def index_device_sync(
         self,
