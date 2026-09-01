@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/luli395/android_everything/releases/download/v0.1.5/AndroidEverything-v0.1.5-windows.zip"><img alt="Download Android Everything v0.1.5 for Windows" src="https://img.shields.io/badge/Download_for_Windows-v0.1.5-e94560?style=for-the-badge&amp;logo=windows11&amp;logoColor=white"></a>
+  <a href="https://github.com/luli395/android_everything/releases/download/v0.1.6/AndroidEverything-v0.1.6-windows.zip"><img alt="Download Android Everything v0.1.6 for Windows" src="https://img.shields.io/badge/Download_for_Windows-v0.1.6-e94560?style=for-the-badge&amp;logo=windows11&amp;logoColor=white"></a>
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@ without reopening folders across the phone for every search.
 
 ## Start searching in three steps
 
-1. **Download and extract** the complete [Windows ZIP for v0.1.5](https://github.com/luli395/android_everything/releases/download/v0.1.5/AndroidEverything-v0.1.5-windows.zip).
+1. **Download and extract** the complete [Windows ZIP for v0.1.6](https://github.com/luli395/android_everything/releases/download/v0.1.6/AndroidEverything-v0.1.6-windows.zip).
 2. **Connect and authorize** the phone: enable USB debugging, connect it over USB, and approve the computer on the device.
 3. **Run and search**: start `AndroidEverything.exe`, select the device, click **Index**, and begin typing.
 
@@ -61,7 +61,8 @@ endorsed by voidtools.
 - **Reusable local index** of names, paths, sizes, extensions, and modification times
 - **Safe SQLite FTS5 trigram queries** for spaces, quotes, parentheses, hyphens, and other special characters
 - **Atomic indexing** that preserves the previous usable index if a refresh fails or is cancelled
-- **Multi-storage discovery** for internal storage, SD cards, and common external-storage paths
+- **Deduplicated multi-storage discovery** that resolves Android mount aliases before scanning internal storage, SD cards, and USB media
+- **Strict scan diagnostics** that preserve the previous index on unexpected remote listing errors
 - **Explicit device binding** so indexing, pulling, and deleting remain tied to the selected ADB serial
 - **Serialized device mutations** so deleting during a refresh cannot leave stale search results
 - **Desktop file actions** to pull, open, reveal in Explorer, copy paths, or delete after confirmation
@@ -88,18 +89,18 @@ flowchart LR
 
 ## Download and verify
 
-Current release: **v0.1.5**
+Current release: **v0.1.6**
 
-- [Complete Windows ZIP](https://github.com/luli395/android_everything/releases/download/v0.1.5/AndroidEverything-v0.1.5-windows.zip)
-- [ZIP SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.5/AndroidEverything-v0.1.5-windows-SHA256.txt)
-- [Release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.5)
+- [Complete Windows ZIP](https://github.com/luli395/android_everything/releases/download/v0.1.6/AndroidEverything-v0.1.6-windows.zip)
+- [ZIP SHA-256 checksum](https://github.com/luli395/android_everything/releases/download/v0.1.6/AndroidEverything-v0.1.6-windows-SHA256.txt)
+- [Release notes](https://github.com/luli395/android_everything/releases/tag/v0.1.6)
 
 Place the ZIP and checksum file in the same directory, then verify them in
 PowerShell:
 
 ```powershell
-$expected = (Get-Content .\AndroidEverything-v0.1.5-windows-SHA256.txt).Split()[0]
-$actual = (Get-FileHash .\AndroidEverything-v0.1.5-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\AndroidEverything-v0.1.6-windows-SHA256.txt).Split()[0]
+$actual = (Get-FileHash .\AndroidEverything-v0.1.6-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
 $actual -eq $expected
 ```
 

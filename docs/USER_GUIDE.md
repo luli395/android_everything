@@ -88,8 +88,8 @@ Common device states:
 
 ### 3.1 Windows executable
 
-1. Open the [v0.1.5 release](https://github.com/luli395/android_everything/releases/tag/v0.1.5).
-2. Download [AndroidEverything-v0.1.5-windows.zip](https://github.com/luli395/android_everything/releases/download/v0.1.5/AndroidEverything-v0.1.5-windows.zip) and [AndroidEverything-v0.1.5-windows-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.5/AndroidEverything-v0.1.5-windows-SHA256.txt).
+1. Open the [v0.1.6 release](https://github.com/luli395/android_everything/releases/tag/v0.1.6).
+2. Download [AndroidEverything-v0.1.6-windows.zip](https://github.com/luli395/android_everything/releases/download/v0.1.6/AndroidEverything-v0.1.6-windows.zip) and [AndroidEverything-v0.1.6-windows-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.6/AndroidEverything-v0.1.6-windows-SHA256.txt).
 3. Verify the ZIP, then extract every file into the same directory.
 4. Double-click `AndroidEverything.exe`.
 
@@ -98,8 +98,8 @@ Python is not required for the Windows executable. Windows may display a SmartSc
 To verify the downloaded executable, open PowerShell in its directory and run:
 
 ```powershell
-$expected = (Get-Content .\AndroidEverything-v0.1.5-windows-SHA256.txt).Split()[0]
-$actual = (Get-FileHash .\AndroidEverything-v0.1.5-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\AndroidEverything-v0.1.6-windows-SHA256.txt).Split()[0]
+$actual = (Get-FileHash .\AndroidEverything-v0.1.6-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
 $actual -eq $expected
 ```
 
@@ -129,11 +129,11 @@ While indexing, the button changes to **Stop**. Click it to request cancellation
 
 The device selector and **Refresh** button remain locked until indexing finishes or cancellation completes. Every ADB command stays bound to the device that was selected when indexing started. Deletion is unavailable during indexing, and a new index cannot start while deletion is active.
 
-Android Everything automatically checks internal storage, SD cards, and several common external-storage paths. The index records file metadata—file name, device path, size, and modification time—but does not copy all file contents to the computer.
+Android Everything automatically checks internal storage, SD cards, and several common external-storage paths. Equivalent Android mount aliases such as `/sdcard` and `/storage/emulated/0` are resolved before scanning so the same storage volume is not indexed twice. The index records file metadata—file name, device path, size, and modification time—but does not copy all file contents to the computer.
 
 The generated index is stored as `%LOCALAPPDATA%\AndroidEverything\files.db`. Clicking **Index** again atomically replaces the old index for the selected device only after a complete scan succeeds.
 
-> Some Android system directories are protected by platform permissions. A standard ADB session can index only files accessible to the current user. Android Everything also skips paths such as `/Android/data` and `.thumbnails`.
+> Some Android system directories are protected by platform permissions. A standard ADB session can index only files accessible to the current user. Explicit `Permission denied` errors for protected child directories are tolerated; other remote scan errors stop the refresh and preserve the previous index. Android Everything also skips paths such as `/Android/data` and `.thumbnails`.
 
 ## 5. Search and Filter
 

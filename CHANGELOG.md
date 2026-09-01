@@ -4,6 +4,8 @@ All notable changes to Android Everything are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-09-01
+
 ### Fixed
 
 - Preserve remote recursive-scan diagnostics and accept a partial listing only
@@ -119,7 +121,8 @@ All notable changes to Android Everything are documented in this file.
 - Keep the main window usable when ADB is not installed and display setup guidance instead of exiting.
 - Report packaged startup errors through a GUI dialog and persistent log rather than a console prompt.
 
-[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/luli395/android_everything/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/luli395/android_everything/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/luli395/android_everything/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/luli395/android_everything/compare/v0.1.2...v0.1.3
