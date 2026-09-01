@@ -9,6 +9,8 @@ All notable changes to Android Everything are documented in this file.
 - Preserve remote recursive-scan diagnostics and accept a partial listing only
   when every reported failure is an explicit `Permission denied` error for a
   child directory of the requested scan root.
+- Resolve and deduplicate Android storage aliases so internal storage and SD
+  cards are not indexed repeatedly through multiple mount-point names.
 
 ## [0.1.5] - 2026-08-26
 

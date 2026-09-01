@@ -3,14 +3,18 @@ ADB wrapper for communicating with Android devices.
 """
 import subprocess
 import os
+import posixpath
 import re
 import shlex
 import shutil
-from typing import List, Optional, Callable
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 
 from config import ADB_PATH
+
+
+STORAGE_PATH_MARKER = "__ANDROID_EVERYTHING_STORAGE_PATH__="
 
 
 @dataclass
@@ -475,7 +479,211 @@ class ADBWrapper:
         except ADBError:
             pass
         
-        return list(paths)
+        return self._deduplicate_storage_paths(
+            paths,
+            device_serial=device_serial,
+        )
+
+    @staticmethod
+    def _normalize_storage_path(path: str) -> Optional[str]:
+        """Return a safe normalized absolute Android storage path."""
+        if not isinstance(path, str):
+            return None
+
+        path = path.strip()
+        if (
+            not path.startswith("/")
+            or path == "/"
+            or any(ord(character) < 32 for character in path)
+        ):
+            return None
+
+        normalized = posixpath.normpath(path)
+        if normalized == "/" or not normalized.startswith("/"):
+            return None
+        return normalized
+
+    @staticmethod
+    def _well_known_storage_key(path: str) -> Optional[str]:
+        """Map Android's common storage aliases to one logical volume key."""
+        primary_aliases = {
+            "/data/media/0",
+            "/mnt/sdcard",
+            "/sdcard",
+            "/storage/emulated/0",
+            "/storage/self/primary",
+        }
+        if path in primary_aliases:
+            return "primary:0"
+
+        match = re.fullmatch(r"/storage/emulated/([^/]+)", path)
+        if match:
+            return f"emulated:{match.group(1)}"
+
+        match = re.fullmatch(r"/data/media/([^/]+)", path)
+        if match:
+            return f"emulated:{match.group(1)}"
+
+        for prefix in (
+            "/storage/",
+            "/mnt/media_rw/",
+            "/mnt/usb_storage/",
+        ):
+            if path.startswith(prefix):
+                volume_name = path[len(prefix):]
+                if volume_name and "/" not in volume_name:
+                    if volume_name not in ("emulated", "self"):
+                        return f"volume:{volume_name.casefold()}"
+
+        return None
+
+    @classmethod
+    def _storage_alias_tokens(
+        cls,
+        path: str,
+        resolved_path: str,
+        identity: str,
+    ) -> set:
+        """Return all identities that can connect equivalent mount points."""
+        tokens = {f"resolved:{resolved_path}"}
+        for candidate in (path, resolved_path):
+            known_key = cls._well_known_storage_key(candidate)
+            if known_key:
+                tokens.add(f"known:{known_key}")
+        if identity:
+            tokens.add(f"identity:{identity}")
+        return tokens
+
+    @staticmethod
+    def _storage_path_priority(path: str) -> Tuple[int, str]:
+        """Prefer stable app-visible mount points over legacy/raw aliases."""
+        if path == "/storage/emulated/0":
+            priority = 0
+        elif re.fullmatch(r"/storage/[^/]+", path) and path not in (
+            "/storage/emulated",
+            "/storage/self",
+        ):
+            priority = 10
+        elif re.fullmatch(r"/storage/emulated/[^/]+", path):
+            priority = 20
+        elif path == "/storage/self/primary":
+            priority = 30
+        elif path == "/sdcard":
+            priority = 40
+        elif path.startswith("/mnt/usb_storage/"):
+            priority = 50
+        elif path.startswith("/mnt/media_rw/"):
+            priority = 60
+        elif path == "/mnt/extSdCard":
+            priority = 70
+        elif path == "/mnt/sdcard":
+            priority = 80
+        elif path.startswith("/data/media/"):
+            priority = 90
+        else:
+            priority = 35
+
+        return priority, path.casefold()
+
+    def _deduplicate_storage_paths(
+        self,
+        paths: Iterable[str],
+        *,
+        device_serial: str,
+    ) -> List[str]:
+        """Resolve storage aliases and return one preferred path per volume."""
+        normalized_paths = sorted({
+            normalized
+            for path in paths
+            for normalized in [self._normalize_storage_path(path)]
+            if normalized is not None
+        })
+        if not normalized_paths:
+            return []
+
+        quoted_paths = " ".join(
+            shlex.quote(path) for path in normalized_paths
+        )
+        probe_command = (
+            f"for storage_path in {quoted_paths}; do "
+            "if [ -d \"$storage_path\" ]; then "
+            "resolved_path=$(readlink -f \"$storage_path\" 2>/dev/null); "
+            "if [ -z \"$resolved_path\" ]; then "
+            "resolved_path=\"$storage_path\"; fi; "
+            "storage_identity=$(stat -c '%d:%i' \"$storage_path\" "
+            "2>/dev/null); "
+            f"printf '{STORAGE_PATH_MARKER}%s\\t%s\\t%s\\n' "
+            "\"$storage_path\" \"$resolved_path\" "
+            "\"$storage_identity\"; "
+            "fi; done; exit 0"
+        )
+
+        probed_paths: Dict[str, Tuple[str, str]] = {}
+        try:
+            output = self.shell(
+                probe_command,
+                device_serial=device_serial,
+            )
+        except ADBError:
+            # Alias probing is an optimization. Preserve storage discovery on
+            # older devices while still collapsing the well-known aliases.
+            probed_paths = {
+                path: (path, "") for path in normalized_paths
+            }
+        else:
+            for line in output.splitlines():
+                if not line.startswith(STORAGE_PATH_MARKER):
+                    continue
+
+                fields = line[len(STORAGE_PATH_MARKER):].split("\t")
+                if len(fields) != 3:
+                    continue
+
+                path = self._normalize_storage_path(fields[0])
+                resolved_path = self._normalize_storage_path(fields[1])
+                identity = fields[2].strip()
+                if path not in normalized_paths or resolved_path is None:
+                    continue
+                if identity and not re.fullmatch(r"[^\s:]+:[^\s:]+", identity):
+                    identity = ""
+
+                probed_paths[path] = (resolved_path, identity)
+
+        alias_groups = []
+        for path in sorted(probed_paths, key=self._storage_path_priority):
+            resolved_path, identity = probed_paths[path]
+            tokens = self._storage_alias_tokens(
+                path,
+                resolved_path,
+                identity,
+            )
+
+            matching_groups = [
+                group
+                for group in alias_groups
+                if group["tokens"].intersection(tokens)
+            ]
+            if not matching_groups:
+                alias_groups.append({"tokens": set(tokens), "paths": [path]})
+                continue
+
+            primary_group = matching_groups[0]
+            primary_group["tokens"].update(tokens)
+            primary_group["paths"].append(path)
+            for other_group in matching_groups[1:]:
+                primary_group["tokens"].update(other_group["tokens"])
+                primary_group["paths"].extend(other_group["paths"])
+                alias_groups.remove(other_group)
+
+        selected_paths = [
+            min(group["paths"], key=self._storage_path_priority)
+            for group in alias_groups
+        ]
+
+        return sorted(
+            selected_paths,
+            key=self._storage_path_priority,
+        )
 
 
 # Singleton instance
