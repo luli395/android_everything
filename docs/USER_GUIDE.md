@@ -131,6 +131,8 @@ The device selector and **Refresh** button remain locked until indexing finishes
 
 Android Everything automatically checks internal storage, SD cards, and several common external-storage paths. Equivalent Android mount aliases such as `/sdcard` and `/storage/emulated/0` are resolved before scanning so the same storage volume is not indexed twice. The index records file metadata—file name, device path, size, and modification time—but does not copy all file contents to the computer.
 
+On supported Android versions, file metadata is transferred through a NUL-delimited scan protocol, so names containing spaces, tabs, newlines, leading dashes, or trailing colons remain unambiguous. Older devices that do not provide the required `find` and `stat` commands automatically use the validated compatibility scanner.
+
 The generated index is stored as `%LOCALAPPDATA%\AndroidEverything\files.db`. Clicking **Index** again atomically replaces the old index for the selected device only after a complete scan succeeds.
 
 > Some Android system directories are protected by platform permissions. A standard ADB session can index only files accessible to the current user. Explicit `Permission denied` errors for protected child directories are tolerated; other remote scan errors stop the refresh and preserve the previous index. Android Everything also skips paths such as `/Android/data` and `.thumbnails`.

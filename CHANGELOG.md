@@ -4,6 +4,13 @@ All notable changes to Android Everything are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Replace recursive `ls` parsing with a versioned, NUL-delimited `find`/`stat`
+  scan protocol so spaces, tabs, newlines, leading dashes, and trailing colons
+  in Android file names are preserved exactly. Devices without the required
+  commands continue to use the validated legacy scanner.
+
 ## [0.1.6] - 2026-09-01
 
 ### Fixed

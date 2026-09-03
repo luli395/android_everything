@@ -63,6 +63,7 @@ endorsed by voidtools.
 - **Atomic indexing** that preserves the previous usable index if a refresh fails or is cancelled
 - **Deduplicated multi-storage discovery** that resolves Android mount aliases before scanning internal storage, SD cards, and USB media
 - **Strict scan diagnostics** that preserve the previous index on unexpected remote listing errors
+- **NUL-delimited metadata scanning** that handles Android file names containing whitespace, leading dashes, or trailing colons
 - **Explicit device binding** so indexing, pulling, and deleting remain tied to the selected ADB serial
 - **Serialized device mutations** so deleting during a refresh cannot leave stale search results
 - **Desktop file actions** to pull, open, reveal in Explorer, copy paths, or delete after confirmation

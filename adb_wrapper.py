@@ -59,6 +59,7 @@ class ADBWrapper:
         args: List[str],
         timeout: int = 30,
         check: bool = True,
+        binary_output: bool = False,
     ) -> subprocess.CompletedProcess:
         """
         Run an ADB command and return its completed process information.
@@ -67,6 +68,7 @@ class ADBWrapper:
             args: Command arguments (without 'adb' prefix)
             timeout: Command timeout in seconds
             check: Raise ADBError when ADB returns a non-zero exit code
+            binary_output: Preserve stdout and stderr as bytes
             
         Returns:
             Completed process containing stdout, stderr, and return code
@@ -74,14 +76,17 @@ class ADBWrapper:
         cmd = [self.adb_path] + args
         
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                encoding='utf-8',
-                errors='replace'
-            )
+            run_options = {
+                "capture_output": True,
+                "timeout": timeout,
+            }
+            if not binary_output:
+                run_options.update({
+                    "text": True,
+                    "encoding": "utf-8",
+                    "errors": "replace",
+                })
+            result = subprocess.run(cmd, **run_options)
         except subprocess.TimeoutExpired as error:
             raise ADBError(
                 f"ADB command timed out after {timeout} seconds: "
@@ -91,7 +96,10 @@ class ADBWrapper:
             raise ADBError(f"Could not run ADB command: {error}") from error
 
         if check and result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
+            detail = (result.stderr or result.stdout or "")
+            if isinstance(detail, bytes):
+                detail = detail.decode("utf-8", errors="replace")
+            detail = detail.strip()
             if len(detail) > 500:
                 detail = detail[:497] + "..."
 
@@ -166,6 +174,22 @@ class ADBWrapper:
         """
         args = self._device_args(device_serial) + ["shell", command]
         result = self._run_command(args, timeout=timeout)
+        return result.stdout
+
+    def shell_bytes(
+        self,
+        command: str,
+        timeout: int = 60,
+        *,
+        device_serial: str,
+    ) -> bytes:
+        """Execute a device shell command without altering binary delimiters."""
+        args = self._device_args(device_serial) + ["shell", command]
+        result = self._run_command(
+            args,
+            timeout=timeout,
+            binary_output=True,
+        )
         return result.stdout
     
     def list_files_fast(

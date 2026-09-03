@@ -53,6 +53,37 @@ class ADBCommandStatusTests(unittest.TestCase):
         with self.assertRaisesRegex(ADBError, r"exit code 2"):
             self.adb.shell("ls /missing", device_serial="device-1")
 
+    @patch("adb_wrapper.subprocess.run")
+    def test_binary_shell_preserves_nul_delimiters(self, run):
+        payload = b"header\0record\r\nname\0trailer\0"
+        run.return_value = subprocess.CompletedProcess(
+            ["adb", "shell", "scan"], 0, payload, b""
+        )
+
+        output = self.adb.shell_bytes(
+            "scan",
+            device_serial="device-1",
+        )
+
+        self.assertEqual(output, payload)
+        self.assertNotIn("text", run.call_args.kwargs)
+        self.assertNotIn("encoding", run.call_args.kwargs)
+
+    @patch("adb_wrapper.subprocess.run")
+    def test_binary_shell_decodes_error_detail(self, run):
+        run.return_value = subprocess.CompletedProcess(
+            ["adb", "shell", "scan"],
+            1,
+            b"",
+            "find: input/output error".encode("utf-8"),
+        )
+
+        with self.assertRaisesRegex(ADBError, "input/output error"):
+            self.adb.shell_bytes(
+                "scan",
+                device_serial="device-1",
+            )
+
     def test_device_specific_command_requires_an_explicit_serial(self):
         self.assertFalse(hasattr(self.adb, "current_device"))
         self.assertFalse(hasattr(self.adb, "select_device"))

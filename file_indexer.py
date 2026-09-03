@@ -24,15 +24,23 @@ class IndexingCancelled(Exception):
 
 SCAN_COMPLETE_MARKER = "__ANDROID_EVERYTHING_SCAN_COMPLETE__="
 SCAN_ERRORS_MARKER = "__ANDROID_EVERYTHING_SCAN_ERRORS__="
+SCAN_PROTOCOL_MARKER = "__ANDROID_EVERYTHING_SCAN_V1__"
+SCAN_UNSUPPORTED_MARKER = "__ANDROID_EVERYTHING_SCAN_UNSUPPORTED__"
+SCAN_RECORD_MARKER = "F"
+
+
+class StructuredScanUnavailable(Exception):
+    """Raised when the device lacks commands required by scan protocol v1."""
 
 
 _PERMISSION_DENIED_PATTERNS = (
     re.compile(
-        r"^ls:\s+cannot open directory\s+(?P<path>.+):\s*"
+        r"^(?P<command>ls|find):\s+cannot open directory\s+(?P<path>.+):\s*"
         r"Permission denied\s*$"
     ),
     re.compile(
-        r"^ls:\s+(?P<path>.+):\s*Permission denied\s*$"
+        r"^(?P<command>ls|find):\s+(?P<path>.+):\s*"
+        r"Permission denied\s*$"
     ),
 )
 
@@ -247,15 +255,205 @@ class FileIndexer:
         path: str,
         progress_callback: Optional[Callable] = None
     ) -> List[FileInfo]:
-        """Scan a single path on the device with file sizes using ls -lR (fast)."""
+        """Scan a path with the NUL-delimited protocol, or a legacy fallback."""
+        try:
+            return self._scan_path_structured(device_serial, path)
+        except StructuredScanUnavailable:
+            return self._scan_path_legacy(device_serial, path)
+
+    def _scan_path_structured(
+        self,
+        device_serial: str,
+        path: str,
+    ) -> List[FileInfo]:
+        """Read exact file metadata using the NUL-delimited scan protocol."""
+        command = self._build_structured_scan_command(path)
+        output = self.adb.shell_bytes(
+            command,
+            timeout=180,
+            device_serial=device_serial,
+        )
+        return self._parse_structured_scan(path, output)
+
+    @staticmethod
+    def _build_structured_scan_command(path: str) -> str:
+        """Build the remote shell command for scan protocol version 1."""
+        quoted_path = shlex.quote(path)
+        worker_script = (
+            "for scan_file do "
+            "scan_metadata=$(stat -c '%s %Y' \"$scan_file\") || exit $?; "
+            "scan_size=${scan_metadata%% *}; "
+            "scan_mtime=${scan_metadata#* }; "
+            f"printf '{SCAN_RECORD_MARKER}\\000%s\\000%s\\000%s\\000' "
+            "\"$scan_size\" \"$scan_mtime\" \"$scan_file\"; "
+            "done"
+        )
+        quoted_worker = shlex.quote(worker_script)
+        return (
+            "if ! command -v find >/dev/null 2>&1 || "
+            "! command -v stat >/dev/null 2>&1; then "
+            f"printf '{SCAN_UNSUPPORTED_MARKER}\\000'; exit 0; fi; "
+            f"if ! ls -ld {quoted_path} >/dev/null; then exit 2; fi; "
+            f"if ! stat -c '%s %Y' {quoted_path} >/dev/null 2>&1; then "
+            f"printf '{SCAN_UNSUPPORTED_MARKER}\\000'; exit 0; fi; "
+            f"printf '{SCAN_PROTOCOL_MARKER}\\000'; "
+            "exec 3>&1; "
+            f"scan_errors=$(find {quoted_path} -type f -exec sh -c "
+            f"{quoted_worker} sh {{}} + 2>&1 1>&3); "
+            "scan_status=$?; "
+            "exec 3>&-; "
+            f"printf '{SCAN_ERRORS_MARKER}\\000%s\\000' \"$scan_errors\"; "
+            f"printf '{SCAN_COMPLETE_MARKER}\\000%s\\000' \"$scan_status\"; "
+            "exit 0"
+        )
+
+    def _parse_structured_scan(
+        self,
+        scan_path: str,
+        payload: bytes,
+    ) -> List[FileInfo]:
+        """Validate and parse a complete NUL-delimited protocol payload."""
+        if not isinstance(payload, bytes):
+            raise ADBError("ADB structured scan returned non-binary output")
+
+        unsupported_payload = (
+            SCAN_UNSUPPORTED_MARKER.encode("ascii") + b"\0"
+        )
+        if payload == unsupported_payload:
+            raise StructuredScanUnavailable()
+
+        fields = payload.split(b"\0")
+        if not fields or fields[-1] != b"":
+            raise ADBError(
+                "ADB structured scan ended without a complete NUL field"
+            )
+        fields.pop()
+
+        protocol_marker = SCAN_PROTOCOL_MARKER.encode("ascii")
+        record_marker = SCAN_RECORD_MARKER.encode("ascii")
+        if not fields or fields[0] != protocol_marker:
+            raise ADBError(
+                "ADB structured scan returned an invalid protocol marker"
+            )
+
         files = []
-        
-        # Recursive ls commonly returns 1 when Android denies access to a
-        # protected child directory even though the accessible listing is
-        # complete and usable. Preserve its remote stderr separately so that
-        # only that specific partial-failure case can be accepted. The
-        # sentinels also prevent an interrupted ADB transport from being
-        # mistaken for a completed scan.
+        field_index = 1
+        while field_index < len(fields) and fields[field_index] == record_marker:
+            if self._cancel_requested:
+                raise IndexingCancelled()
+            if field_index + 3 >= len(fields):
+                raise ADBError("ADB structured scan returned a truncated record")
+
+            size_field = fields[field_index + 1]
+            modified_field = fields[field_index + 2]
+            path_field = fields[field_index + 3]
+            field_index += 4
+
+            try:
+                size_text = size_field.decode("ascii")
+                modified_text = modified_field.decode("ascii")
+            except UnicodeDecodeError as error:
+                raise ADBError(
+                    "ADB structured scan returned non-numeric metadata"
+                ) from error
+
+            if (
+                not re.fullmatch(r"\d+", size_text)
+                or not re.fullmatch(r"-?\d+", modified_text)
+            ):
+                raise ADBError(
+                    "ADB structured scan returned invalid numeric metadata"
+                )
+
+            size = int(size_text)
+            if size > 9223372036854775807:
+                raise ADBError("ADB structured scan returned an invalid file size")
+
+            remote_path = path_field.decode("utf-8", errors="replace")
+            self._validate_structured_file_path(scan_path, remote_path)
+            name = posixpath.basename(remote_path)
+            if not name or self._should_skip_file(remote_path):
+                continue
+
+            try:
+                modified = datetime.fromtimestamp(int(modified_text))
+            except (OSError, OverflowError, ValueError):
+                modified = None
+
+            files.append(FileInfo(
+                name=name,
+                path=remote_path,
+                size=size,
+                modified=modified,
+                is_dir=False,
+            ))
+
+        trailer = fields[field_index:]
+        errors_marker = SCAN_ERRORS_MARKER.encode("ascii")
+        complete_marker = SCAN_COMPLETE_MARKER.encode("ascii")
+        if (
+            len(trailer) != 4
+            or trailer[0] != errors_marker
+            or trailer[2] != complete_marker
+        ):
+            raise ADBError("ADB structured scan returned an invalid trailer")
+
+        scan_errors = trailer[1].decode("utf-8", errors="replace")
+        try:
+            status_text = trailer[3].decode("ascii")
+        except UnicodeDecodeError as error:
+            raise ADBError(
+                "ADB scan returned an invalid completion status"
+            ) from error
+        if not re.fullmatch(r"\d+", status_text):
+            raise ADBError("ADB scan returned an invalid completion status")
+
+        scan_status = int(status_text)
+        self._validate_scan_errors(
+            scan_path,
+            scan_status,
+            scan_errors,
+            allowed_commands={"find"},
+        )
+        if scan_status == 1 and not files:
+            raise ADBError("Android file listing failed without returning data")
+
+        return files
+
+    @staticmethod
+    def _validate_structured_file_path(scan_path: str, file_path: str):
+        """Require every structured record to belong to the requested root."""
+        normalized_root = posixpath.normpath(scan_path)
+        normalized_file = posixpath.normpath(file_path)
+        child_prefix = normalized_root.rstrip("/") + "/"
+        if (
+            not file_path
+            or "\0" in file_path
+            or not normalized_root.startswith("/")
+            or not normalized_file.startswith(child_prefix)
+        ):
+            raise ADBError(
+                "ADB structured scan returned a path outside the scan root"
+            )
+
+    @staticmethod
+    def _should_skip_file(file_path: str) -> bool:
+        """Return whether a file belongs to an intentionally skipped folder."""
+        directory_parts = file_path.split("/")[1:-1]
+        if ".thumbnails" in directory_parts:
+            return True
+        return any(
+            directory_parts[index:index + 2] == ["Android", "data"]
+            for index in range(len(directory_parts) - 1)
+        )
+
+    def _scan_path_legacy(
+        self,
+        device_serial: str,
+        path: str,
+    ) -> List[FileInfo]:
+        """Scan with recursive ls when find/stat protocol support is absent."""
+        files = []
         quoted_path = shlex.quote(path)
         cmd = (
             f"if ! ls -ld {quoted_path} >/dev/null; then exit 2; fi; "
@@ -296,7 +494,12 @@ class FileIndexer:
 
         listing = listing.rstrip("\r\n")
         scan_errors = scan_errors.strip("\r\n")
-        self._validate_scan_errors(path, scan_status, scan_errors)
+        self._validate_scan_errors(
+            path,
+            scan_status,
+            scan_errors,
+            allowed_commands={"ls"},
+        )
 
         # Even an explicitly permitted partial failure must return a usable
         # listing; otherwise replacing the previous index would lose data.
@@ -327,10 +530,6 @@ class FileIndexer:
             if line.startswith('total ') or line.startswith('d') or line.startswith('l'):
                 continue
 
-            # Skip certain system paths
-            if any(skip in current_dir for skip in ['/Android/data', '/.thumbnails']):
-                continue
-
             # Parse file line: -rw-rw---- 1 owner group size date time name
             # Example: -rw-rw---- 1 u0_a123 u0_a123 12345 2024-01-15 10:30 photo.jpg
             if line.startswith('-'):
@@ -353,6 +552,8 @@ class FileIndexer:
 
                     if name and name not in ['.', '..']:
                         file_path = f"{current_dir}/{name}"
+                        if self._should_skip_file(file_path):
+                            continue
                         files.append(FileInfo(
                             name=name,
                             path=file_path,
@@ -368,6 +569,7 @@ class FileIndexer:
         scan_path: str,
         scan_status: int,
         scan_errors: str,
+        allowed_commands=None,
     ):
         """Accept only explicit permission failures for scanned subfolders."""
         error_lines = [
@@ -394,7 +596,11 @@ class FileIndexer:
             raise ADBError(message)
 
         if not error_lines or not all(
-            FileIndexer._is_permission_denied_child(scan_path, line)
+            FileIndexer._is_permission_denied_child(
+                scan_path,
+                line,
+                allowed_commands=allowed_commands,
+            )
             for line in error_lines
         ):
             detail = FileIndexer._format_scan_errors(error_lines)
@@ -407,22 +613,31 @@ class FileIndexer:
             )
 
     @staticmethod
-    def _is_permission_denied_child(scan_path: str, error_line: str) -> bool:
-        """Return whether an ls diagnostic names a child of ``scan_path``."""
+    def _is_permission_denied_child(
+        scan_path: str,
+        error_line: str,
+        allowed_commands=None,
+    ) -> bool:
+        """Return whether a scan diagnostic names a child of ``scan_path``."""
         denied_path = None
         for pattern in _PERMISSION_DENIED_PATTERNS:
             match = pattern.fullmatch(error_line)
             if match:
+                if (
+                    allowed_commands is not None
+                    and match.group("command") not in allowed_commands
+                ):
+                    return False
                 denied_path = match.group("path").strip()
                 break
 
         if denied_path is None:
             return False
 
+        quote_pairs = {"'": "'", '"': '"', "‘": "’", "“": "”"}
         if (
             len(denied_path) >= 2
-            and denied_path[0] == denied_path[-1]
-            and denied_path[0] in ("'", '"')
+            and quote_pairs.get(denied_path[0]) == denied_path[-1]
         ):
             denied_path = denied_path[1:-1]
 

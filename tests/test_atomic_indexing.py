@@ -1,4 +1,5 @@
 import sqlite3
+import shlex
 import threading
 import unittest
 from pathlib import Path
@@ -11,6 +12,9 @@ from file_indexer import (
     IndexingCancelled,
     SCAN_COMPLETE_MARKER,
     SCAN_ERRORS_MARKER,
+    SCAN_PROTOCOL_MARKER,
+    SCAN_RECORD_MARKER,
+    SCAN_UNSUPPORTED_MARKER,
 )
 
 
@@ -23,21 +27,28 @@ class FakeADB:
     def __init__(
         self,
         output="",
+        records=None,
         error=None,
         scan_status=0,
         scan_errors="",
+        structured_payload=None,
+        structured_supported=True,
         include_errors_marker=True,
         include_scan_marker=True,
     ):
         self.output = output
+        self.records = records or []
         self.error = error
         self.scan_status = scan_status
         self.scan_errors = scan_errors
+        self.structured_payload = structured_payload
+        self.structured_supported = structured_supported
         self.include_errors_marker = include_errors_marker
         self.include_scan_marker = include_scan_marker
         self.storage_device_serials = []
         self.shell_device_serials = []
         self.shell_commands = []
+        self.binary_shell_commands = []
 
     def get_storage_paths(self, *, device_serial):
         self.storage_device_serials.append(device_serial)
@@ -59,6 +70,32 @@ class FakeADB:
                 f"{SCAN_COMPLETE_MARKER}{self.scan_status}\n"
             )
         return f"{self.output}{errors_payload}"
+
+    def shell_bytes(self, command, timeout=60, *, device_serial):
+        self.shell_device_serials.append(device_serial)
+        self.binary_shell_commands.append(command)
+        if self.error:
+            raise self.error
+        if not self.structured_supported:
+            return SCAN_UNSUPPORTED_MARKER.encode("ascii") + b"\0"
+        if self.structured_payload is not None:
+            return self.structured_payload
+
+        fields = [SCAN_PROTOCOL_MARKER.encode("ascii")]
+        for size, modified, path in self.records:
+            fields.extend([
+                SCAN_RECORD_MARKER.encode("ascii"),
+                str(size).encode("ascii"),
+                str(modified).encode("ascii"),
+                path.encode("utf-8"),
+            ])
+        fields.extend([
+            SCAN_ERRORS_MARKER.encode("ascii"),
+            self.scan_errors.encode("utf-8"),
+            SCAN_COMPLETE_MARKER.encode("ascii"),
+            str(self.scan_status).encode("ascii"),
+        ])
+        return b"\0".join(fields) + b"\0"
 
     def get_devices(self):
         return [DeviceInfo("device-1", "device", model="Test Phone")]
@@ -96,12 +133,10 @@ class AtomicIndexingTests(unittest.TestCase):
         self.assertEqual(device, ("Old Phone", 1))
 
     def test_successfully_replaces_the_complete_index(self):
-        output = "\n".join([
-            "/storage/emulated/0:",
-            "-rw-rw---- 1 user group 10 2026-08-12 10:00 new one.jpg",
-            "-rw-rw---- 1 user group 20 2026-08-12 10:01 new-two.pdf",
+        adb = FakeADB(records=[
+            (10, 1786528800, "/storage/emulated/0/new one.jpg"),
+            (20, 1786528860, "/storage/emulated/0/new-two.pdf"),
         ])
-        adb = FakeADB(output=output)
         self.indexer = FileIndexer(adb, self.db)
 
         count = self.indexer.index_device_sync("device-1")
@@ -116,6 +151,101 @@ class AtomicIndexingTests(unittest.TestCase):
         self.assertEqual(adb.storage_device_serials, ["device-1"])
         self.assertEqual(adb.shell_device_serials, ["device-1"])
 
+    def test_structured_protocol_preserves_special_file_names(self):
+        paths = [
+            "/storage/emulated/0/report:",
+            "/storage/emulated/0/line\nbreak.txt",
+            "/storage/emulated/0/tab\tname.pdf",
+            "/storage/emulated/0/- leading spaces -.jpg",
+        ]
+        adb = FakeADB(records=[
+            (index + 1, 1786528800 + index, path)
+            for index, path in enumerate(paths)
+        ])
+        self.indexer = FileIndexer(adb, self.db)
+
+        count = self.indexer.index_device_sync("device-1")
+
+        self.assertEqual(count, 4)
+        indexed = self.db.search("device-1", "", limit=100)
+        self.assertEqual({row["path"] for row in indexed}, set(paths))
+        self.assertIn("-exec sh -c", adb.binary_shell_commands[0])
+
+    def test_structured_protocol_skips_only_exact_protected_folders(self):
+        adb = FakeADB(records=[
+            (1, 1786528800, "/storage/emulated/0/Android/data/app/x.dat"),
+            (2, 1786528800, "/storage/emulated/0/DCIM/.thumbnails/x.jpg"),
+            (3, 1786528800, "/storage/emulated/0/Android/database/keep.db"),
+            (4, 1786528800, "/storage/emulated/0/foo.thumbnails/keep.jpg"),
+        ])
+        self.indexer = FileIndexer(adb, self.db)
+
+        self.assertEqual(self.indexer.index_device_sync("device-1"), 2)
+        indexed = self.db.search("device-1", "", limit=100)
+        self.assertEqual(
+            {row["name"] for row in indexed},
+            {"keep.db", "keep.jpg"},
+        )
+
+    def test_structured_protocol_rejects_truncated_record(self):
+        payload = b"\0".join([
+            SCAN_PROTOCOL_MARKER.encode("ascii"),
+            SCAN_RECORD_MARKER.encode("ascii"),
+            b"10",
+        ]) + b"\0"
+        self.indexer = FileIndexer(
+            FakeADB(structured_payload=payload),
+            self.db,
+        )
+
+        with self.assertRaisesRegex(ADBError, "truncated record"):
+            self.indexer.index_device_sync("device-1")
+
+        self.assert_old_index_preserved()
+
+    def test_structured_protocol_rejects_path_outside_scan_root(self):
+        self.indexer = FileIndexer(
+            FakeADB(records=[(
+                10,
+                1786528800,
+                "/storage/emulated/01/not-a-child.txt",
+            )]),
+            self.db,
+        )
+
+        with self.assertRaisesRegex(ADBError, "outside the scan root"):
+            self.indexer.index_device_sync("device-1")
+
+        self.assert_old_index_preserved()
+
+    def test_legacy_ls_is_used_only_when_protocol_is_unavailable(self):
+        output = "\n".join([
+            "/storage/emulated/0:",
+            "-rw-rw---- 1 user group 10 2026-08-12 10:00 legacy.txt",
+        ])
+        adb = FakeADB(
+            output=output,
+            structured_supported=False,
+        )
+        self.indexer = FileIndexer(adb, self.db)
+
+        self.assertEqual(self.indexer.index_device_sync("device-1"), 1)
+        self.assertEqual(
+            [row["name"] for row in self.db.search("device-1", "legacy")],
+            ["legacy.txt"],
+        )
+        self.assertEqual(len(adb.binary_shell_commands), 1)
+        self.assertEqual(len(adb.shell_commands), 1)
+        self.assertIn("ls -lR", adb.shell_commands[0])
+
+    def test_structured_scan_command_quotes_the_root_path(self):
+        scan_path = "/storage/card's files"
+        command = FileIndexer._build_structured_scan_command(scan_path)
+
+        self.assertIn(shlex.quote(scan_path), command)
+        self.assertIn(SCAN_PROTOCOL_MARKER, command)
+        self.assertIn(SCAN_COMPLETE_MARKER, command)
+
     def test_scan_failure_preserves_the_previous_index(self):
         self.indexer = FileIndexer(
             FakeADB(error=RuntimeError("scan failed")),
@@ -128,16 +258,16 @@ class AtomicIndexingTests(unittest.TestCase):
         self.assert_old_index_preserved()
 
     def test_inaccessible_child_directories_do_not_discard_valid_results(self):
-        output = "\n".join([
-            "/storage/emulated/0:",
-            "-rw-rw---- 1 user group 10 2026-08-12 10:00 visible.txt",
-        ])
         self.indexer = FileIndexer(
             FakeADB(
-                output=output,
+                records=[(
+                    10,
+                    1786528800,
+                    "/storage/emulated/0/visible.txt",
+                )],
                 scan_status=1,
                 scan_errors=(
-                    "ls: /storage/emulated/0/Android/data: Permission denied"
+                    "find: /storage/emulated/0/Android/data: Permission denied"
                 ),
             ),
             self.db,
@@ -152,16 +282,16 @@ class AtomicIndexingTests(unittest.TestCase):
         )
 
     def test_gnu_style_permission_denied_child_error_is_allowed(self):
-        output = "\n".join([
-            "/storage/emulated/0:",
-            "-rw-rw---- 1 user group 10 2026-08-12 10:00 visible.txt",
-        ])
         self.indexer = FileIndexer(
             FakeADB(
-                output=output,
+                records=[(
+                    10,
+                    1786528800,
+                    "/storage/emulated/0/visible.txt",
+                )],
                 scan_status=1,
                 scan_errors=(
-                    "ls: cannot open directory "
+                    "find: cannot open directory "
                     "'/storage/emulated/0/Android/data': Permission denied"
                 ),
             ),
@@ -170,12 +300,37 @@ class AtomicIndexingTests(unittest.TestCase):
 
         self.assertEqual(self.indexer.index_device_sync("device-1"), 1)
 
+    def test_structured_scan_rejects_non_find_permission_diagnostic(self):
+        self.indexer = FileIndexer(
+            FakeADB(
+                records=[(
+                    10,
+                    1786528800,
+                    "/storage/emulated/0/visible.txt",
+                )],
+                scan_status=1,
+                scan_errors=(
+                    "ls: /storage/emulated/0/Android/data: Permission denied"
+                ),
+            ),
+            self.db,
+        )
+
+        with self.assertRaisesRegex(ADBError, "Permission denied"):
+            self.indexer.index_device_sync("device-1")
+
+        self.assert_old_index_preserved()
+
     def test_non_permission_scan_error_is_preserved_and_rejected(self):
         adb = FakeADB(
-            output="/storage/emulated/0:",
+            records=[(
+                10,
+                1786528800,
+                "/storage/emulated/0/visible.txt",
+            )],
             scan_status=1,
             scan_errors=(
-                "ls: /storage/emulated/0/DCIM: Input/output error"
+                "find: /storage/emulated/0/DCIM: Input/output error"
             ),
         )
         self.indexer = FileIndexer(adb, self.db)
@@ -184,13 +339,19 @@ class AtomicIndexingTests(unittest.TestCase):
             self.indexer.index_device_sync("device-1")
 
         self.assert_old_index_preserved()
-        self.assertNotIn("2>/dev/null", adb.shell_commands[0])
-        self.assertIn(SCAN_ERRORS_MARKER, adb.shell_commands[0])
+        self.assertIn("find", adb.binary_shell_commands[0])
+        self.assertIn("stat -c", adb.binary_shell_commands[0])
+        self.assertIn("\\000", adb.binary_shell_commands[0])
+        self.assertNotIn("ls -lR", adb.binary_shell_commands[0])
 
     def test_status_one_without_remote_error_is_rejected(self):
         self.indexer = FileIndexer(
             FakeADB(
-                output="/storage/emulated/0:",
+                records=[(
+                    10,
+                    1786528800,
+                    "/storage/emulated/0/visible.txt",
+                )],
                 scan_status=1,
             ),
             self.db,
@@ -204,10 +365,14 @@ class AtomicIndexingTests(unittest.TestCase):
     def test_permission_denied_for_scan_root_is_rejected(self):
         self.indexer = FileIndexer(
             FakeADB(
-                output="/storage/emulated/0:",
+                records=[(
+                    10,
+                    1786528800,
+                    "/storage/emulated/0/visible.txt",
+                )],
                 scan_status=1,
                 scan_errors=(
-                    "ls: /storage/emulated/0: Permission denied"
+                    "find: /storage/emulated/0: Permission denied"
                 ),
             ),
             self.db,
@@ -221,10 +386,14 @@ class AtomicIndexingTests(unittest.TestCase):
     def test_permission_denied_for_sibling_path_is_rejected(self):
         self.indexer = FileIndexer(
             FakeADB(
-                output="/storage/emulated/0:",
+                records=[(
+                    10,
+                    1786528800,
+                    "/storage/emulated/0/visible.txt",
+                )],
                 scan_status=1,
                 scan_errors=(
-                    "ls: /storage/emulated/01/private: Permission denied"
+                    "find: /storage/emulated/01/private: Permission denied"
                 ),
             ),
             self.db,
@@ -238,11 +407,15 @@ class AtomicIndexingTests(unittest.TestCase):
     def test_mixed_permission_and_transport_errors_are_rejected(self):
         self.indexer = FileIndexer(
             FakeADB(
-                output="/storage/emulated/0:",
+                records=[(
+                    10,
+                    1786528800,
+                    "/storage/emulated/0/visible.txt",
+                )],
                 scan_status=1,
                 scan_errors="\n".join([
-                    "ls: /storage/emulated/0/Android/data: Permission denied",
-                    "ls: /storage/emulated/0/DCIM: Transport endpoint is not connected",
+                    "find: /storage/emulated/0/Android/data: Permission denied",
+                    "find: /storage/emulated/0/DCIM: Transport endpoint is not connected",
                 ]),
             ),
             self.db,
@@ -256,9 +429,13 @@ class AtomicIndexingTests(unittest.TestCase):
     def test_remote_error_with_zero_status_is_rejected(self):
         self.indexer = FileIndexer(
             FakeADB(
-                output="/storage/emulated/0:",
+                records=[(
+                    10,
+                    1786528800,
+                    "/storage/emulated/0/visible.txt",
+                )],
                 scan_status=0,
-                scan_errors="ls: unexpected diagnostic",
+                scan_errors="find: unexpected diagnostic",
             ),
             self.db,
         )
@@ -272,6 +449,7 @@ class AtomicIndexingTests(unittest.TestCase):
         self.indexer = FileIndexer(
             FakeADB(
                 output="partial output",
+                structured_supported=False,
                 include_errors_marker=False,
             ),
             self.db,
@@ -284,7 +462,11 @@ class AtomicIndexingTests(unittest.TestCase):
 
     def test_missing_scan_completion_marker_preserves_previous_index(self):
         self.indexer = FileIndexer(
-            FakeADB(output="partial output", include_scan_marker=False),
+            FakeADB(
+                output="partial output",
+                structured_supported=False,
+                include_scan_marker=False,
+            ),
             self.db,
         )
 
@@ -335,11 +517,11 @@ class AtomicIndexingTests(unittest.TestCase):
         self.assert_old_index_preserved()
 
     def test_cancelled_worker_reports_completion_without_replacing_index(self):
-        output = "\n".join([
-            "/storage/emulated/0:",
-            "-rw-rw---- 1 user group 10 2026-08-12 10:00 new.txt",
-        ])
-        self.indexer = FileIndexer(FakeADB(output=output), self.db)
+        self.indexer = FileIndexer(FakeADB(records=[(
+            10,
+            1786528800,
+            "/storage/emulated/0/new.txt",
+        )]), self.db)
         cancelled = threading.Event()
 
         def request_cancel(message, current, total):
