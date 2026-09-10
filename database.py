@@ -5,16 +5,19 @@ import sqlite3
 import os
 import re
 import unicodedata
+import uuid
 from typing import Callable, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 from config import DATABASE_PATH
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+FTS_SCHEMA_VERSION = 2
 TRIGRAM_MIN_LENGTH = 3
 TRIGRAM_TOKENIZER = "trigram"
+STAGING_RETENTION_DAYS = 1
 
 
 class SearchQueryError(RuntimeError):
@@ -124,6 +127,37 @@ class Database:
                 )
             ''')
 
+            # A scan is written here in small committed batches. Search keeps
+            # reading the live ``files`` table until the completed scan is
+            # promoted in one atomic transaction.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS index_staging_runs (
+                    scan_id TEXT PRIMARY KEY,
+                    device_serial TEXT NOT NULL,
+                    started_at TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_staging_runs_device
+                ON index_staging_runs(device_serial)
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS files_staging (
+                    scan_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    name_normalized TEXT NOT NULL,
+                    path_normalized TEXT NOT NULL,
+                    size INTEGER DEFAULT 0,
+                    modified TEXT,
+                    is_dir INTEGER DEFAULT 0,
+                    extension TEXT,
+                    PRIMARY KEY(scan_id, path),
+                    FOREIGN KEY(scan_id) REFERENCES index_staging_runs(scan_id)
+                        ON DELETE CASCADE
+                ) WITHOUT ROWID
+            ''')
+
             self._ensure_normalized_columns(cursor)
             self._ensure_trigram_index(cursor)
 
@@ -172,7 +206,7 @@ class Database:
         row = cursor.fetchone()
         fts_sql = (row[0] or "").lower() if row else ""
         needs_rebuild = (
-            schema_version < SCHEMA_VERSION
+            schema_version < FTS_SCHEMA_VERSION
             or "trigram" not in fts_sql
             or "name_normalized" not in fts_sql
             or "path_normalized" not in fts_sql
@@ -238,6 +272,7 @@ class Database:
         """Get a database connection."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.create_function(
             "unicode_search_normalize",
             1,
@@ -278,81 +313,206 @@ class Database:
         if batch_size <= 0:
             raise ValueError("batch_size must be greater than zero")
 
-        now = datetime.now().isoformat()
         total = len(files)
+
+        scan_id = self.begin_index_staging(device_serial)
+        try:
+            if progress_callback:
+                progress_callback(0, total)
+
+            for start in range(0, total, batch_size):
+                batch = files[start:start + batch_size]
+                self.stage_files_batch(scan_id, device_serial, batch)
+                if progress_callback:
+                    progress_callback(start + len(batch), total)
+
+            def before_commit():
+                # This final callback also gives an empty replacement a
+                # cancellation point immediately before publication.
+                if progress_callback:
+                    progress_callback(total, total)
+
+            return self.publish_staged_index(
+                scan_id,
+                device_serial,
+                model=model,
+                before_commit=before_commit,
+            )
+        finally:
+            # Publication removes its own rows. This also cleans up batches
+            # left behind by validation, cancellation, or database failures.
+            self.discard_staged_index(scan_id)
+
+    def begin_index_staging(self, device_serial: str) -> str:
+        """Create and return an isolated staging run for one device."""
+        if not device_serial or not device_serial.strip():
+            raise ValueError("device_serial is required")
+
+        scan_id = uuid.uuid4().hex
+        started_at = datetime.now().isoformat()
+        stale_before = (
+            datetime.now() - timedelta(days=STAGING_RETENTION_DAYS)
+        ).isoformat()
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            # A process killed during a scan cannot run its normal cleanup.
+            # Remove only old runs so another active application instance is
+            # not disturbed.
+            cursor.execute(
+                "DELETE FROM index_staging_runs WHERE started_at < ?",
+                (stale_before,),
+            )
+            cursor.execute('''
+                INSERT INTO index_staging_runs
+                (scan_id, device_serial, started_at)
+                VALUES (?, ?, ?)
+            ''', (scan_id, device_serial, started_at))
+            conn.commit()
+
+        return scan_id
+
+    @staticmethod
+    def _require_staging_run(
+        cursor: sqlite3.Cursor,
+        scan_id: str,
+        device_serial: str,
+    ) -> str:
+        """Return the run timestamp or reject a missing/mismatched run."""
+        cursor.execute('''
+            SELECT started_at
+            FROM index_staging_runs
+            WHERE scan_id = ? AND device_serial = ?
+        ''', (scan_id, device_serial))
+        row = cursor.fetchone()
+        if row is None:
+            raise ValueError("The index staging run does not exist")
+        return row[0]
+
+    def stage_files_batch(
+        self,
+        scan_id: str,
+        device_serial: str,
+        files: List[Tuple],
+    ) -> int:
+        """Commit one bounded file batch without changing the live index.
+
+        Returns the number of records accepted from this batch.
+        """
+        if not files:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                self._require_staging_run(cursor, scan_id, device_serial)
+                return 0
+
+        data = [
+            (
+                scan_id,
+                name,
+                path,
+                normalize_search_text(name),
+                normalize_search_text(path),
+                size,
+                modified,
+                is_dir,
+                extension,
+            )
+            for name, path, size, modified, is_dir, extension in files
+        ]
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute("BEGIN IMMEDIATE")
+                self._require_staging_run(cursor, scan_id, device_serial)
+                cursor.executemany('''
+                    INSERT INTO files_staging
+                    (scan_id, name, path, name_normalized, path_normalized,
+                     size, modified, is_dir, extension)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(scan_id, path) DO UPDATE SET
+                        name = excluded.name,
+                        name_normalized = excluded.name_normalized,
+                        path_normalized = excluded.path_normalized,
+                        size = excluded.size,
+                        modified = excluded.modified,
+                        is_dir = excluded.is_dir,
+                        extension = excluded.extension
+                ''', data)
+                conn.commit()
+                return len(data)
+            except BaseException:
+                conn.rollback()
+                raise
 
-                if progress_callback:
-                    progress_callback(0, total)
-
-                cursor.execute(
-                    "DELETE FROM files WHERE device_serial = ?",
-                    (device_serial,)
+    def publish_staged_index(
+        self,
+        scan_id: str,
+        device_serial: str,
+        model: str = "",
+        before_commit: Optional[Callable[[], None]] = None,
+    ) -> int:
+        """Atomically replace a live device index with a completed staging run."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("BEGIN IMMEDIATE")
+                self._require_staging_run(
+                    cursor,
+                    scan_id,
+                    device_serial,
                 )
-
-                for start in range(0, total, batch_size):
-                    batch = files[start:start + batch_size]
-                    data = [
-                        (
-                            device_serial,
-                            name,
-                            path,
-                            normalize_search_text(name),
-                            normalize_search_text(path),
-                            size,
-                            modified,
-                            is_dir,
-                            extension,
-                            now,
-                        )
-                        for name, path, size, modified, is_dir, extension in batch
-                    ]
-                    cursor.executemany('''
-                        INSERT INTO files
-                        (device_serial, name, path, name_normalized,
-                         path_normalized, size, modified, is_dir, extension,
-                         indexed_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(device_serial, path) DO UPDATE SET
-                            name = excluded.name,
-                            name_normalized = excluded.name_normalized,
-                            path_normalized = excluded.path_normalized,
-                            size = excluded.size,
-                            modified = excluded.modified,
-                            is_dir = excluded.is_dir,
-                            extension = excluded.extension,
-                            indexed_at = excluded.indexed_at
-                    ''', data)
-
-                    if progress_callback:
-                        progress_callback(start + len(batch), total)
-
+                indexed_at = datetime.now().isoformat()
                 cursor.execute(
-                    "SELECT COUNT(*) FROM files WHERE device_serial = ?",
-                    (device_serial,)
+                    "SELECT COUNT(*) FROM files_staging WHERE scan_id = ?",
+                    (scan_id,),
                 )
                 indexed_count = cursor.fetchone()[0]
 
+                cursor.execute(
+                    "DELETE FROM files WHERE device_serial = ?",
+                    (device_serial,),
+                )
+                cursor.execute('''
+                    INSERT INTO files
+                    (device_serial, name, path, name_normalized,
+                     path_normalized, size, modified, is_dir, extension,
+                     indexed_at)
+                    SELECT ?, name, path, name_normalized, path_normalized,
+                           size, modified, is_dir, extension, ?
+                    FROM files_staging
+                    WHERE scan_id = ?
+                ''', (device_serial, indexed_at, scan_id))
                 cursor.execute('''
                     INSERT OR REPLACE INTO devices
                     (serial, model, last_indexed, file_count)
                     VALUES (?, ?, ?, ?)
-                ''', (device_serial, model, now, indexed_count))
+                ''', (device_serial, model, indexed_at, indexed_count))
 
-                # This final callback also gives an empty replacement a
-                # cancellation point immediately before commit.
-                if progress_callback:
-                    progress_callback(total, total)
+                if before_commit:
+                    before_commit()
 
+                cursor.execute(
+                    "DELETE FROM index_staging_runs WHERE scan_id = ?",
+                    (scan_id,),
+                )
                 conn.commit()
                 return indexed_count
             except BaseException:
                 conn.rollback()
                 raise
+
+    def discard_staged_index(self, scan_id: str):
+        """Remove one staging run without touching searchable rows."""
+        if not scan_id:
+            return
+        with self._get_connection() as conn:
+            conn.execute(
+                "DELETE FROM index_staging_runs WHERE scan_id = ?",
+                (scan_id,),
+            )
+            conn.commit()
     
     def insert_files_batch(self, device_serial: str, files: List[Tuple]) -> int:
         """

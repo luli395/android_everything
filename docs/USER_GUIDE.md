@@ -133,7 +133,7 @@ Android Everything automatically checks internal storage, SD cards, and several 
 
 On supported Android versions, file metadata is transferred through a NUL-delimited scan protocol, so names containing spaces, tabs, newlines, leading dashes, or trailing colons remain unambiguous. Older devices that do not provide the required `find` and `stat` commands automatically use the validated compatibility scanner.
 
-The generated index is stored as `%LOCALAPPDATA%\AndroidEverything\files.db`. Clicking **Index** again atomically replaces the old index for the selected device only after a complete scan succeeds.
+The generated index is stored as `%LOCALAPPDATA%\AndroidEverything\files.db`. During indexing, metadata is streamed into bounded SQLite staging batches rather than retained as one large in-memory listing. Search continues to use the previous index; only after the complete scan and its protocol trailer have been validated is the staged snapshot published atomically. Failed and cancelled scans discard their staging data and leave the previous index intact.
 
 > Some Android system directories are protected by platform permissions. A standard ADB session can index only files accessible to the current user. Explicit `Permission denied` errors for protected child directories are tolerated; other remote scan errors stop the refresh and preserve the previous index. Android Everything also skips paths such as `/Android/data` and `.thumbnails`.
 

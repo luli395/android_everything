@@ -10,6 +10,10 @@ All notable changes to Android Everything are documented in this file.
   scan protocol so spaces, tabs, newlines, leading dashes, and trailing colons
   in Android file names are preserved exactly. Devices without the required
   commands continue to use the validated legacy scanner.
+- Stream structured scan output through bounded in-memory chunks and SQLite
+  staging batches. The previous searchable index stays live until the complete
+  protocol trailer is validated and the staged snapshot is published
+  atomically.
 
 ## [0.1.6] - 2026-09-01
 

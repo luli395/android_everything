@@ -60,7 +60,7 @@ endorsed by voidtools.
 - **True substring search** across names and Android paths, so `hot` can match `photo.jpg`
 - **Reusable local index** of names, paths, sizes, extensions, and modification times
 - **Safe SQLite FTS5 trigram queries** for spaces, quotes, parentheses, hyphens, and other special characters
-- **Atomic indexing** that preserves the previous usable index if a refresh fails or is cancelled
+- **Bounded-memory streaming indexer** that writes SQLite staging batches and atomically publishes only a complete, validated scan
 - **Deduplicated multi-storage discovery** that resolves Android mount aliases before scanning internal storage, SD cards, and USB media
 - **Strict scan diagnostics** that preserve the previous index on unexpected remote listing errors
 - **NUL-delimited metadata scanning** that handles Android file names containing whitespace, leading dashes, or trailing colons
@@ -75,7 +75,7 @@ endorsed by voidtools.
 flowchart LR
     Device[Android Device] -->|USB debugging| ADB[ADB]
     ADB -->|file metadata| Scanner[Scanner / File Indexer]
-    Scanner -->|atomic index update| Database[(SQLite + FTS5)]
+    Scanner -->|stream staging batches| Database[(SQLite staging + FTS5)]
     Database -->|fast local queries| Search[Search Engine]
     Search -->|results| UI[Tkinter Windows UI]
     UI -->|index, pull, delete| ADB
@@ -84,8 +84,8 @@ flowchart LR
 **ADB → Scanner → SQLite/FTS5 → Tkinter**
 
 1. **ADB** discovers devices and performs serial-bound Android file operations.
-2. **Scanner** reads metadata and prepares a complete replacement index.
-3. **SQLite/FTS5** commits the new index atomically and serves local searches.
+2. **Scanner** incrementally parses metadata without retaining the full device listing in memory.
+3. **SQLite/FTS5** stores bounded staging batches, atomically publishes the completed snapshot, and serves local searches.
 4. **Tkinter** presents the familiar Windows desktop search and file-action workflow.
 
 ## Download and verify

@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from adb_wrapper import ADBError, ADBWrapper
+from adb_wrapper import ADBCommandCancelled, ADBError, ADBWrapper
 from database import Database
 from file_indexer import FileIndexer
 
@@ -84,6 +84,52 @@ class ADBCommandStatusTests(unittest.TestCase):
                 device_serial="device-1",
             )
 
+    def test_stream_command_preserves_binary_chunks(self):
+        script = (
+            "import sys; "
+            "sys.stdout.buffer.write(b'header\\x00record\\r\\nname\\x00'); "
+            "sys.stdout.buffer.flush()"
+        )
+
+        chunks = list(self.adb._stream_command_bytes(
+            ["-c", script],
+            timeout=5,
+            chunk_size=3,
+        ))
+
+        self.assertEqual(
+            b"".join(chunks),
+            b"header\0record\r\nname\0",
+        )
+        self.assertTrue(all(0 < len(chunk) <= 3 for chunk in chunks))
+
+    def test_stream_command_reports_nonzero_stderr(self):
+        script = (
+            "import sys; "
+            "sys.stderr.write('error: device offline'); "
+            "sys.stderr.flush(); sys.exit(7)"
+        )
+
+        with self.assertRaisesRegex(
+            ADBError,
+            r"exit code 7: error: device offline",
+        ):
+            list(self.adb._stream_command_bytes(
+                ["-c", script],
+                timeout=5,
+                chunk_size=16,
+            ))
+
+    def test_stream_command_can_cancel_before_more_output_arrives(self):
+        cancellation_checks = iter((False, True))
+        with self.assertRaises(ADBCommandCancelled):
+            list(self.adb._stream_command_bytes(
+                ["-c", "import time; time.sleep(10)"],
+                timeout=5,
+                chunk_size=16,
+                cancel_check=lambda: next(cancellation_checks, True),
+            ))
+
     def test_device_specific_command_requires_an_explicit_serial(self):
         self.assertFalse(hasattr(self.adb, "current_device"))
         self.assertFalse(hasattr(self.adb, "select_device"))
@@ -148,21 +194,21 @@ class ADBCommandStatusTests(unittest.TestCase):
             ["-s", "device-2", "shell"],
         )
 
-    @patch("adb_wrapper.subprocess.run")
-    def test_failed_scan_preserves_the_existing_index(self, run):
-        run.return_value = subprocess.CompletedProcess(
-            ["adb", "shell", "ls"], 1, "", "error: device offline"
-        )
-
+    def test_failed_scan_preserves_the_existing_index(self):
         with TemporaryDirectory() as temp_dir:
             db = Database(str(Path(temp_dir) / "files.db"))
             db.replace_device_index("device-1", OLD_FILES, model="Test Phone")
             indexer = FileIndexer(self.adb, db)
 
-            with self.assertRaisesRegex(ADBError, r"device offline"):
-                indexer.index_device_sync(
-                    "device-1", paths=["/storage/emulated/0"]
-                )
+            with patch.object(
+                self.adb,
+                "shell_stream",
+                side_effect=ADBError("error: device offline"),
+            ):
+                with self.assertRaisesRegex(ADBError, r"device offline"):
+                    indexer.index_device_sync(
+                        "device-1", paths=["/storage/emulated/0"]
+                    )
 
             self.assertEqual(db.get_file_count("device-1"), 1)
             self.assertEqual(

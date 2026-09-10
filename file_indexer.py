@@ -6,10 +6,16 @@ import posixpath
 import re
 import shlex
 import threading
-from typing import Callable, Optional, List
+from typing import Callable, Iterable, Iterator, Optional, List
 from datetime import datetime
 
-from adb_wrapper import ADBError, ADBWrapper, FileInfo, get_adb
+from adb_wrapper import (
+    ADBCommandCancelled,
+    ADBError,
+    ADBWrapper,
+    FileInfo,
+    get_adb,
+)
 from database import Database, get_database
 from device_mutation import (
     DeviceMutationCoordinator,
@@ -27,6 +33,8 @@ SCAN_ERRORS_MARKER = "__ANDROID_EVERYTHING_SCAN_ERRORS__="
 SCAN_PROTOCOL_MARKER = "__ANDROID_EVERYTHING_SCAN_V1__"
 SCAN_UNSUPPORTED_MARKER = "__ANDROID_EVERYTHING_SCAN_UNSUPPORTED__"
 SCAN_RECORD_MARKER = "F"
+INDEX_STAGING_BATCH_SIZE = 1000
+MAX_SCAN_FIELD_BYTES = 16 * 1024 * 1024
 
 
 class StructuredScanUnavailable(Exception):
@@ -110,6 +118,7 @@ class FileIndexer:
         
         def do_index():
             device_lock = None
+            staging_id = None
             try:
                 # Hold this lock from the first ADB read through the atomic
                 # database commit. A delete for the same device must therefore
@@ -128,60 +137,87 @@ class FileIndexer:
                     if not scan_paths:
                         scan_paths = ["/storage/emulated/0"]
                 
-                all_files = []
-                
-                # Scan each path
+                staging_id = self.db.begin_index_staging(device_serial)
+                staged_count = 0
+                pending_batch = []
+
+                def flush_pending_batch(progress_value: int):
+                    nonlocal staged_count
+                    if not pending_batch:
+                        return
+
+                    staged_count += self.db.stage_files_batch(
+                        staging_id,
+                        device_serial,
+                        pending_batch,
+                    )
+                    pending_batch.clear()
+                    if progress_callback:
+                        progress_callback(
+                            f"Staged {staged_count} files...",
+                            progress_value,
+                            100,
+                        )
+
+                # Parse each path as ADB produces records and persist bounded
+                # batches immediately. The searchable table remains unchanged.
                 for i, scan_path in enumerate(scan_paths):
                     if self._cancel_requested:
-                        break
+                        raise IndexingCancelled()
                     
                     if progress_callback:
                         progress_callback(
                             f"Scanning {scan_path}...", 
-                            int(i / len(scan_paths) * 50),
+                            int(i / len(scan_paths) * 70),
                             100
                         )
                     
-                    # Get files from device
                     files = self._scan_path(
                         device_serial,
                         scan_path,
                         progress_callback,
                     )
-                    all_files.extend(files)
-                
+                    stage_progress = int(
+                        (i + 1) / max(len(scan_paths), 1) * 70
+                    )
+                    for file_info in files:
+                        if self._cancel_requested:
+                            raise IndexingCancelled()
+
+                        extension = (
+                            os.path.splitext(file_info.name)[1].lower()
+                            if file_info.name
+                            else ""
+                        )
+                        modified = (
+                            file_info.modified.isoformat()
+                            if file_info.modified
+                            else None
+                        )
+                        pending_batch.append((
+                            file_info.name,
+                            file_info.path,
+                            file_info.size,
+                            modified,
+                            1 if file_info.is_dir else 0,
+                            extension,
+                        ))
+                        if len(pending_batch) >= INDEX_STAGING_BATCH_SIZE:
+                            flush_pending_batch(stage_progress)
+
+                    # Make progress durable even when each storage volume has
+                    # fewer records than the normal batch size.
+                    flush_pending_batch(stage_progress)
+
                 if self._cancel_requested:
-                    report_cancelled()
-                    return
-                
-                # Prepare the complete replacement before touching the current
-                # database index.
+                    raise IndexingCancelled()
+
                 if progress_callback:
                     progress_callback(
-                        f"Preparing {len(all_files)} files...", 75, 100
+                        f"Preparing {staged_count} files...", 75, 100
                     )
-                
-                # Prepare data for batch insert
-                batch_data = []
-                for f in all_files:
-                    if self._cancel_requested:
-                        report_cancelled()
-                        return
-
-                    ext = os.path.splitext(f.name)[1].lower() if f.name else ""
-                    modified_str = f.modified.isoformat() if f.modified else None
-                    batch_data.append((
-                        f.name,
-                        f.path,
-                        f.size,
-                        modified_str,
-                        1 if f.is_dir else 0,
-                        ext
-                    ))
-                
                 if self._cancel_requested:
-                    report_cancelled()
-                    return
+                    raise IndexingCancelled()
 
                 # Fetch metadata before opening the replacement transaction so
                 # an ADB failure cannot affect the previous index.
@@ -191,27 +227,22 @@ class FileIndexer:
                     ""
                 )
 
-                def on_replace_progress(processed: int, total: int):
+                if progress_callback:
+                    progress_callback(
+                        "Publishing completed index...", 95, 100
+                    )
+
+                def before_publish_commit():
                     if self._cancel_requested:
                         raise IndexingCancelled()
 
-                    if progress_callback:
-                        progress = 75 + int(
-                            (processed / max(total, 1)) * 20
-                        )
-                        progress_callback(
-                            f"Saving to database... ({processed}/{total})",
-                            progress,
-                            100
-                        )
-
-                indexed_count = self.db.replace_device_index(
+                indexed_count = self.db.publish_staged_index(
+                    staging_id,
                     device_serial,
-                    batch_data,
                     model=model,
-                    batch_size=5000,
-                    progress_callback=on_replace_progress,
+                    before_commit=before_publish_commit,
                 )
+                staging_id = None
                 
                 if progress_callback:
                     progress_callback(
@@ -233,6 +264,13 @@ class FileIndexer:
                 if error_callback:
                     error_callback(e)
             finally:
+                if staging_id is not None:
+                    try:
+                        self.db.discard_staged_index(staging_id)
+                    except Exception:
+                        # Preserve the original scan/cancellation result. Old
+                        # staging runs are also reaped by a later scan.
+                        pass
                 if device_lock is not None:
                     self.mutation_coordinator.release(device_lock)
                 self._indexing = False
@@ -254,26 +292,46 @@ class FileIndexer:
         device_serial: str,
         path: str,
         progress_callback: Optional[Callable] = None
-    ) -> List[FileInfo]:
+    ) -> Iterator[FileInfo]:
         """Scan a path with the NUL-delimited protocol, or a legacy fallback."""
         try:
-            return self._scan_path_structured(device_serial, path)
+            yield from self._scan_path_structured(device_serial, path)
         except StructuredScanUnavailable:
-            return self._scan_path_legacy(device_serial, path)
+            yield from self._scan_path_legacy(device_serial, path)
 
     def _scan_path_structured(
         self,
         device_serial: str,
         path: str,
-    ) -> List[FileInfo]:
-        """Read exact file metadata using the NUL-delimited scan protocol."""
+    ) -> Iterator[FileInfo]:
+        """Stream exact file metadata using the NUL-delimited scan protocol."""
         command = self._build_structured_scan_command(path)
-        output = self.adb.shell_bytes(
-            command,
-            timeout=180,
-            device_serial=device_serial,
-        )
-        return self._parse_structured_scan(path, output)
+        shell_stream = getattr(self.adb, "shell_stream", None)
+        if shell_stream is None:
+            # Compatibility for third-party ADBWrapper substitutes. The real
+            # wrapper always takes the bounded streaming path.
+            chunks = iter((self.adb.shell_bytes(
+                command,
+                timeout=180,
+                device_serial=device_serial,
+            ),))
+        else:
+            chunks = shell_stream(
+                command,
+                timeout=180,
+                device_serial=device_serial,
+                cancel_check=lambda: self._cancel_requested,
+            )
+
+        try:
+            try:
+                yield from self._parse_structured_scan(path, chunks)
+            except ADBCommandCancelled as error:
+                raise IndexingCancelled() from error
+        finally:
+            close_stream = getattr(chunks, "close", None)
+            if close_stream:
+                close_stream()
 
     @staticmethod
     def _build_structured_scan_command(path: str) -> str:
@@ -310,44 +368,55 @@ class FileIndexer:
     def _parse_structured_scan(
         self,
         scan_path: str,
-        payload: bytes,
-    ) -> List[FileInfo]:
-        """Validate and parse a complete NUL-delimited protocol payload."""
-        if not isinstance(payload, bytes):
-            raise ADBError("ADB structured scan returned non-binary output")
-
-        unsupported_payload = (
-            SCAN_UNSUPPORTED_MARKER.encode("ascii") + b"\0"
-        )
-        if payload == unsupported_payload:
-            raise StructuredScanUnavailable()
-
-        fields = payload.split(b"\0")
-        if not fields or fields[-1] != b"":
-            raise ADBError(
-                "ADB structured scan ended without a complete NUL field"
-            )
-        fields.pop()
-
+        chunks: Iterable[bytes],
+    ) -> Iterator[FileInfo]:
+        """Incrementally validate and parse a NUL-delimited scan stream."""
+        if isinstance(chunks, bytes):
+            chunks = (chunks,)
+        fields = iter(self._iter_nul_fields(chunks))
         protocol_marker = SCAN_PROTOCOL_MARKER.encode("ascii")
+        unsupported_marker = SCAN_UNSUPPORTED_MARKER.encode("ascii")
         record_marker = SCAN_RECORD_MARKER.encode("ascii")
-        if not fields or fields[0] != protocol_marker:
+        errors_marker = SCAN_ERRORS_MARKER.encode("ascii")
+        complete_marker = SCAN_COMPLETE_MARKER.encode("ascii")
+        end_marker = object()
+
+        if self._cancel_requested:
+            raise IndexingCancelled()
+        first_field = next(fields, end_marker)
+        if first_field == unsupported_marker:
+            if next(fields, end_marker) is not end_marker:
+                raise ADBError(
+                    "ADB structured scan returned invalid unsupported payload"
+                )
+            raise StructuredScanUnavailable()
+        if first_field != protocol_marker:
             raise ADBError(
                 "ADB structured scan returned an invalid protocol marker"
             )
 
-        files = []
-        field_index = 1
-        while field_index < len(fields) and fields[field_index] == record_marker:
+        file_count = 0
+        while True:
             if self._cancel_requested:
                 raise IndexingCancelled()
-            if field_index + 3 >= len(fields):
-                raise ADBError("ADB structured scan returned a truncated record")
 
-            size_field = fields[field_index + 1]
-            modified_field = fields[field_index + 2]
-            path_field = fields[field_index + 3]
-            field_index += 4
+            field = next(fields, end_marker)
+            if field is end_marker:
+                raise ADBError("ADB structured scan returned an invalid trailer")
+            if field == errors_marker:
+                break
+            if field != record_marker:
+                raise ADBError("ADB structured scan returned an invalid trailer")
+
+            size_field = next(fields, end_marker)
+            modified_field = next(fields, end_marker)
+            path_field = next(fields, end_marker)
+            if (
+                size_field is end_marker
+                or modified_field is end_marker
+                or path_field is end_marker
+            ):
+                raise ADBError("ADB structured scan returned a truncated record")
 
             try:
                 size_text = size_field.decode("ascii")
@@ -380,27 +449,29 @@ class FileIndexer:
             except (OSError, OverflowError, ValueError):
                 modified = None
 
-            files.append(FileInfo(
+            file_count += 1
+            yield FileInfo(
                 name=name,
                 path=remote_path,
                 size=size,
                 modified=modified,
                 is_dir=False,
-            ))
+            )
 
-        trailer = fields[field_index:]
-        errors_marker = SCAN_ERRORS_MARKER.encode("ascii")
-        complete_marker = SCAN_COMPLETE_MARKER.encode("ascii")
+        scan_errors_field = next(fields, end_marker)
+        received_complete_marker = next(fields, end_marker)
+        status_field = next(fields, end_marker)
         if (
-            len(trailer) != 4
-            or trailer[0] != errors_marker
-            or trailer[2] != complete_marker
+            scan_errors_field is end_marker
+            or received_complete_marker != complete_marker
+            or status_field is end_marker
+            or next(fields, end_marker) is not end_marker
         ):
             raise ADBError("ADB structured scan returned an invalid trailer")
 
-        scan_errors = trailer[1].decode("utf-8", errors="replace")
+        scan_errors = scan_errors_field.decode("utf-8", errors="replace")
         try:
-            status_text = trailer[3].decode("ascii")
+            status_text = status_field.decode("ascii")
         except UnicodeDecodeError as error:
             raise ADBError(
                 "ADB scan returned an invalid completion status"
@@ -415,10 +486,49 @@ class FileIndexer:
             scan_errors,
             allowed_commands={"find"},
         )
-        if scan_status == 1 and not files:
+        if scan_status == 1 and file_count == 0:
             raise ADBError("Android file listing failed without returning data")
 
-        return files
+    def _iter_nul_fields(
+        self,
+        chunks: Iterable[bytes],
+    ) -> Iterator[bytes]:
+        """Yield complete NUL-delimited fields without buffering the scan."""
+        pending = bytearray()
+        for chunk in chunks:
+            if self._cancel_requested:
+                raise IndexingCancelled()
+            if not isinstance(chunk, bytes):
+                raise ADBError("ADB structured scan returned non-binary output")
+            if not chunk:
+                continue
+
+            pending.extend(chunk)
+            field_start = 0
+            while True:
+                delimiter_index = pending.find(0, field_start)
+                if delimiter_index < 0:
+                    if len(pending) - field_start > MAX_SCAN_FIELD_BYTES:
+                        raise ADBError(
+                            "ADB structured scan returned an oversized field"
+                        )
+                    break
+
+                if delimiter_index - field_start > MAX_SCAN_FIELD_BYTES:
+                    raise ADBError(
+                        "ADB structured scan returned an oversized field"
+                    )
+                field = bytes(pending[field_start:delimiter_index])
+                field_start = delimiter_index + 1
+                yield field
+
+            if field_start:
+                del pending[:field_start]
+
+        if pending:
+            raise ADBError(
+                "ADB structured scan ended without a complete NUL field"
+            )
 
     @staticmethod
     def _validate_structured_file_path(scan_path: str, file_path: str):

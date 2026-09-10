@@ -4,10 +4,13 @@ ADB wrapper for communicating with Android devices.
 import subprocess
 import os
 import posixpath
+import queue
 import re
 import shlex
 import shutil
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+import threading
+import time
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -15,6 +18,9 @@ from config import ADB_PATH
 
 
 STORAGE_PATH_MARKER = "__ANDROID_EVERYTHING_STORAGE_PATH__="
+ADB_STREAM_CHUNK_SIZE = 64 * 1024
+ADB_STREAM_QUEUE_SIZE = 8
+ADB_ERROR_PREVIEW_SIZE = 8192
 
 
 @dataclass
@@ -40,6 +46,10 @@ class FileInfo:
 class ADBError(Exception):
     """Exception raised when ADB command fails."""
     pass
+
+
+class ADBCommandCancelled(ADBError):
+    """Raised when a streaming ADB command is cancelled by its consumer."""
 
 
 class ADBWrapper:
@@ -191,6 +201,179 @@ class ADBWrapper:
             binary_output=True,
         )
         return result.stdout
+
+    def shell_stream(
+        self,
+        command: str,
+        timeout: int = 60,
+        *,
+        device_serial: str,
+        chunk_size: int = ADB_STREAM_CHUNK_SIZE,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> Iterator[bytes]:
+        """Stream device shell stdout as bounded, unmodified byte chunks.
+
+        A background pipe reader keeps this portable on Windows while the
+        bounded queue applies backpressure if the consumer is writing a batch
+        to SQLite. Closing the iterator terminates an in-flight ADB process.
+        """
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than zero")
+
+        args = self._device_args(device_serial) + ["shell", command]
+        return self._stream_command_bytes(
+            args,
+            timeout=timeout,
+            chunk_size=chunk_size,
+            cancel_check=cancel_check,
+        )
+
+    def _stream_command_bytes(
+        self,
+        args: List[str],
+        timeout: int,
+        chunk_size: int,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> Iterator[bytes]:
+        """Yield stdout from a subprocess while draining stderr concurrently."""
+        if cancel_check and cancel_check():
+            raise ADBCommandCancelled("ADB command was cancelled")
+
+        cmd = [self.adb_path] + args
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except Exception as error:
+            raise ADBError(f"Could not run ADB command: {error}") from error
+
+        if process.stdout is None or process.stderr is None:
+            process.kill()
+            process.wait()
+            raise ADBError("Could not capture ADB command output")
+
+        output_queue = queue.Queue(maxsize=ADB_STREAM_QUEUE_SIZE)
+        end_of_output = object()
+        stop_reading = threading.Event()
+        reader_errors = []
+        stderr_preview = bytearray()
+        stdout_preview = bytearray()
+
+        def enqueue_output(item):
+            while not stop_reading.is_set():
+                try:
+                    output_queue.put(item, timeout=0.1)
+                    return
+                except queue.Full:
+                    continue
+
+        def read_stdout():
+            try:
+                read_chunk = getattr(process.stdout, "read1", process.stdout.read)
+                while not stop_reading.is_set():
+                    chunk = read_chunk(chunk_size)
+                    if not chunk:
+                        break
+                    enqueue_output(chunk)
+            except BaseException as error:
+                reader_errors.append(error)
+            finally:
+                enqueue_output(end_of_output)
+
+        def read_stderr():
+            try:
+                while True:
+                    chunk = process.stderr.read(4096)
+                    if not chunk:
+                        break
+                    remaining = ADB_ERROR_PREVIEW_SIZE - len(stderr_preview)
+                    if remaining > 0:
+                        stderr_preview.extend(chunk[:remaining])
+            except BaseException as error:
+                reader_errors.append(error)
+
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        deadline = time.monotonic() + timeout
+
+        try:
+            while True:
+                if cancel_check and cancel_check():
+                    raise ADBCommandCancelled("ADB command was cancelled")
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ADBError(
+                        f"ADB command timed out after {timeout} seconds: "
+                        f"{' '.join(args)}"
+                    )
+
+                try:
+                    item = output_queue.get(timeout=min(0.1, remaining))
+                except queue.Empty:
+                    continue
+
+                if item is end_of_output:
+                    break
+
+                if len(stdout_preview) < ADB_ERROR_PREVIEW_SIZE:
+                    preview_remaining = (
+                        ADB_ERROR_PREVIEW_SIZE - len(stdout_preview)
+                    )
+                    stdout_preview.extend(item[:preview_remaining])
+                yield item
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ADBError(
+                    f"ADB command timed out after {timeout} seconds: "
+                    f"{' '.join(args)}"
+                )
+            try:
+                return_code = process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired as error:
+                raise ADBError(
+                    f"ADB command timed out after {timeout} seconds: "
+                    f"{' '.join(args)}"
+                ) from error
+
+            stdout_thread.join()
+            stderr_thread.join()
+            if reader_errors:
+                raise ADBError(
+                    f"Could not read ADB command output: {reader_errors[0]}"
+                ) from reader_errors[0]
+
+            if return_code != 0:
+                detail_bytes = stderr_preview or stdout_preview
+                detail = detail_bytes.decode("utf-8", errors="replace").strip()
+                if len(detail) > 500:
+                    detail = detail[:497] + "..."
+                message = f"ADB command failed with exit code {return_code}"
+                if detail:
+                    message += f": {detail}"
+                raise ADBError(message)
+        finally:
+            stop_reading.set()
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            try:
+                process.stdout.close()
+            finally:
+                process.stderr.close()
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
     
     def list_files_fast(
         self,

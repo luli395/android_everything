@@ -4,6 +4,7 @@ import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from adb_wrapper import ADBError, DeviceInfo
 from database import Database
@@ -33,6 +34,7 @@ class FakeADB:
         scan_errors="",
         structured_payload=None,
         structured_supported=True,
+        stream_chunk_size=65536,
         include_errors_marker=True,
         include_scan_marker=True,
     ):
@@ -43,6 +45,7 @@ class FakeADB:
         self.scan_errors = scan_errors
         self.structured_payload = structured_payload
         self.structured_supported = structured_supported
+        self.stream_chunk_size = stream_chunk_size
         self.include_errors_marker = include_errors_marker
         self.include_scan_marker = include_scan_marker
         self.storage_device_serials = []
@@ -74,6 +77,25 @@ class FakeADB:
     def shell_bytes(self, command, timeout=60, *, device_serial):
         self.shell_device_serials.append(device_serial)
         self.binary_shell_commands.append(command)
+        return self._structured_output()
+
+    def shell_stream(
+        self,
+        command,
+        timeout=60,
+        *,
+        device_serial,
+        cancel_check=None,
+    ):
+        self.shell_device_serials.append(device_serial)
+        self.binary_shell_commands.append(command)
+        payload = self._structured_output()
+        for start in range(0, len(payload), self.stream_chunk_size):
+            if cancel_check and cancel_check():
+                return
+            yield payload[start:start + self.stream_chunk_size]
+
+    def _structured_output(self):
         if self.error:
             raise self.error
         if not self.structured_supported:
@@ -132,6 +154,19 @@ class AtomicIndexingTests(unittest.TestCase):
             conn.close()
         self.assertEqual(device, ("Old Phone", 1))
 
+    def assert_staging_empty(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            staged_files = conn.execute(
+                "SELECT COUNT(*) FROM files_staging"
+            ).fetchone()[0]
+            staged_runs = conn.execute(
+                "SELECT COUNT(*) FROM index_staging_runs"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual((staged_files, staged_runs), (0, 0))
+
     def test_successfully_replaces_the_complete_index(self):
         adb = FakeADB(records=[
             (10, 1786528800, "/storage/emulated/0/new one.jpg"),
@@ -170,6 +205,90 @@ class AtomicIndexingTests(unittest.TestCase):
         indexed = self.db.search("device-1", "", limit=100)
         self.assertEqual({row["path"] for row in indexed}, set(paths))
         self.assertIn("-exec sh -c", adb.binary_shell_commands[0])
+
+    def test_structured_protocol_parses_fields_split_across_chunks(self):
+        path = "/storage/emulated/0/chunked file.txt"
+        adb = FakeADB(
+            records=[(123, 1786528800, path)],
+            stream_chunk_size=1,
+        )
+        self.indexer = FileIndexer(adb, self.db)
+
+        self.assertEqual(self.indexer.index_device_sync("device-1"), 1)
+        self.assertEqual(
+            [row["path"] for row in self.db.search("device-1", "chunked")],
+            [path],
+        )
+
+    def test_streams_bounded_batches_while_live_index_remains_searchable(self):
+        adb = FakeADB(records=[
+            (index, 1786528800, f"/storage/emulated/0/new-{index}.txt")
+            for index in range(5)
+        ], stream_chunk_size=7)
+        self.indexer = FileIndexer(adb, self.db)
+        real_stage_batch = self.db.stage_files_batch
+        observed_batch_sizes = []
+        live_paths_during_staging = []
+        new_paths_during_staging = []
+
+        def observe_staging(scan_id, device_serial, files):
+            result = real_stage_batch(scan_id, device_serial, files)
+            observed_batch_sizes.append(len(files))
+            live_paths_during_staging.append([
+                row["path"]
+                for row in self.db.search("device-1", "old")
+            ])
+            new_paths_during_staging.append([
+                row["path"]
+                for row in self.db.search("device-1", "new")
+            ])
+            return result
+
+        with patch(
+            "file_indexer.INDEX_STAGING_BATCH_SIZE",
+            2,
+        ), patch.object(
+            self.db,
+            "stage_files_batch",
+            side_effect=observe_staging,
+        ):
+            count = self.indexer.index_device_sync("device-1")
+
+        self.assertEqual(count, 5)
+        self.assertEqual(observed_batch_sizes, [2, 2, 1])
+        self.assertEqual(
+            live_paths_during_staging,
+            [[OLD_FILES[0][1]]] * 3,
+        )
+        self.assertEqual(new_paths_during_staging, [[], [], []])
+        self.assertEqual(self.db.search("device-1", "old"), [])
+        self.assert_staging_empty()
+
+    def test_invalid_trailer_discards_already_committed_staging_batches(self):
+        fields = [SCAN_PROTOCOL_MARKER.encode("ascii")]
+        for index in range(3):
+            fields.extend([
+                SCAN_RECORD_MARKER.encode("ascii"),
+                str(index).encode("ascii"),
+                b"1786528800",
+                f"/storage/emulated/0/new-{index}.txt".encode("utf-8"),
+            ])
+        fields.extend([
+            SCAN_ERRORS_MARKER.encode("ascii"),
+            b"",
+        ])
+        adb = FakeADB(
+            structured_payload=b"\0".join(fields) + b"\0",
+            stream_chunk_size=5,
+        )
+        self.indexer = FileIndexer(adb, self.db)
+
+        with patch("file_indexer.INDEX_STAGING_BATCH_SIZE", 2):
+            with self.assertRaisesRegex(ADBError, "invalid trailer"):
+                self.indexer.index_device_sync("device-1")
+
+        self.assert_old_index_preserved()
+        self.assert_staging_empty()
 
     def test_structured_protocol_skips_only_exact_protected_folders(self):
         adb = FakeADB(records=[
@@ -479,10 +598,13 @@ class AtomicIndexingTests(unittest.TestCase):
         new_files = [
             ("new.txt", "/storage/emulated/0/new.txt", 5, None, 0, ".txt"),
         ]
+        completed_callbacks = [0]
 
         def fail_before_commit(processed, total):
             if processed == total:
-                raise RuntimeError("simulated write failure")
+                completed_callbacks[0] += 1
+                if completed_callbacks[0] == 2:
+                    raise RuntimeError("simulated write failure")
 
         with self.assertRaisesRegex(RuntimeError, "simulated write failure"):
             self.db.replace_device_index(
@@ -539,6 +661,7 @@ class AtomicIndexingTests(unittest.TestCase):
         self.indexer._current_thread.join(timeout=2)
         self.assertFalse(self.indexer._current_thread.is_alive())
         self.assert_old_index_preserved()
+        self.assert_staging_empty()
 
 
 if __name__ == "__main__":
