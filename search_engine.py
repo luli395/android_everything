@@ -1,8 +1,9 @@
 """
 Search engine for querying indexed files.
 """
+import threading
 from typing import List, Optional
-from database import Database, get_database
+from database import Database, SearchPage, get_database
 from config import MAX_RESULTS_DISPLAY
 
 
@@ -12,6 +13,22 @@ class SearchEngine:
     def __init__(self, db: Optional[Database] = None):
         self.db = db or get_database()
         self._cache = {}  # Simple query cache
+        self._cache_lock = threading.RLock()
+        self._cache_epoch = 0
+
+    def _get_cached(self, cache_key):
+        with self._cache_lock:
+            return self._cache.get(cache_key), self._cache_epoch
+
+    def _store_cached(self, cache_key, value, epoch: int):
+        with self._cache_lock:
+            # An index refresh may clear the cache while this database query is
+            # running. Never reinsert a result from the previous index epoch.
+            if epoch != self._cache_epoch:
+                return
+            if len(self._cache) >= 100:
+                self._cache.clear()
+            self._cache[cache_key] = value
     
     def search(
         self,
@@ -38,8 +55,9 @@ class SearchEngine:
         
         # Check cache
         cache_key = (device_serial, query, extension_filter, limit)
-        if cache_key in self._cache:
-            return self._cache[cache_key]
+        cached, epoch = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
         
         # Search database
         results = self.db.search(
@@ -49,16 +67,56 @@ class SearchEngine:
             extension_filter=extension_filter
         )
         
-        # Cache results (limit cache size)
-        if len(self._cache) > 100:
-            self._cache.clear()
-        self._cache[cache_key] = results
+        self._store_cached(cache_key, results, epoch)
         
         return results
+
+    def search_page(
+        self,
+        device_serial: str,
+        query: str,
+        offset: int,
+        limit: int,
+        extension_filter: Optional[str] = None,
+        sort_column: str = "name",
+        sort_reverse: bool = False,
+        known_total: Optional[int] = None,
+    ) -> SearchPage:
+        """Return one cached database page for the virtual file list."""
+        query = query.strip().lower()
+        cache_key = (
+            "page",
+            device_serial,
+            query,
+            extension_filter,
+            offset,
+            limit,
+            sort_column,
+            sort_reverse,
+            known_total,
+        )
+        cached, epoch = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        page = self.db.search_page(
+            device_serial,
+            query,
+            offset=offset,
+            limit=limit,
+            extension_filter=extension_filter,
+            sort_column=sort_column,
+            sort_reverse=sort_reverse,
+            known_total=known_total,
+        )
+        self._store_cached(cache_key, page, epoch)
+        return page
     
     def clear_cache(self):
         """Clear the search cache."""
-        self._cache.clear()
+        with self._cache_lock:
+            self._cache_epoch += 1
+            self._cache.clear()
     
     def get_file_count(self, device_serial: str) -> int:
         """Get total indexed file count."""

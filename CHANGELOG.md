@@ -14,6 +14,10 @@ All notable changes to Android Everything are documented in this file.
   staging batches. The previous searchable index stays live until the complete
   protocol trailer is validated and the staged snapshot is published
   atomically.
+- Run searches on background workers, reject stale query completions, and use
+  database pagination with a bounded page cache. The Tk result view now reuses
+  only enough Treeview rows for the visible viewport instead of creating one
+  widget item for every match.
 
 ## [0.1.6] - 2026-09-01
 

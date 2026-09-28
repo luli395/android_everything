@@ -1,13 +1,17 @@
 import sqlite3
+import threading
 import unittest
+from concurrent.futures import Future
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from queue import Queue
 from unittest.mock import Mock, patch
 
 from database import (
     SCHEMA_VERSION,
     Database,
+    SearchPage,
     SearchQueryError,
     build_fts_trigram_query,
     extract_search_terms,
@@ -37,6 +41,75 @@ class FakeVar:
 
     def set(self, value):
         self.value = value
+
+
+class QueuedRoot:
+    def __init__(self):
+        self.callbacks = []
+        self.owner_thread = threading.get_ident()
+        self.after_threads = []
+
+    def after(self, delay, callback):
+        self.after_threads.append(threading.get_ident())
+        self.callbacks.append(callback)
+        return str(len(self.callbacks))
+
+    def after_cancel(self, callback_id):
+        return None
+
+    def run_callbacks(self):
+        callbacks, self.callbacks = self.callbacks, []
+        for callback in callbacks:
+            callback()
+
+
+class ManualExecutor:
+    def __init__(self):
+        self.jobs = []
+
+    def submit(self, function, *args):
+        future = Future()
+        self.jobs.append((future, function, args))
+        return future
+
+    def start(self, index=0):
+        future, _, _ = self.jobs[index]
+        return future.set_running_or_notify_cancel()
+
+    def finish(self, index=0):
+        future, function, args = self.jobs[index]
+        if not future.running() and not self.start(index):
+            return
+        try:
+            future.set_result(function(*args))
+        except Exception as error:
+            future.set_exception(error)
+
+
+def make_async_search_window():
+    window = MainWindow.__new__(MainWindow)
+    window.root = QueuedRoot()
+    window._current_device = "device-1"
+    window._search_timer = None
+    window._search_generation = 0
+    window._active_search = None
+    window._active_search_total = None
+    window._search_pages_in_flight = set()
+    window._search_futures = set()
+    window._search_future_requests = {}
+    window._search_completions = Queue()
+    window._search_poll_timer = None
+    window._search_executor = ManualExecutor()
+    window._closing = False
+    window.search_var = FakeVar("photo")
+    window.ext_var = FakeVar("All")
+    window.count_var = FakeVar()
+    window.status_var = FakeVar()
+    window.file_list = Mock()
+    window.file_list.sort_column = "name"
+    window.file_list.sort_reverse = False
+    window.search_engine = Mock()
+    return window
 
 
 class SpecialCharacterSearchTests(unittest.TestCase):
@@ -123,25 +196,120 @@ class SpecialCharacterSearchTests(unittest.TestCase):
                 self.db.search("device-1", "photo")
 
     def test_main_window_displays_search_error_in_status_bar(self):
-        window = MainWindow.__new__(MainWindow)
-        window._current_device = "device-1"
-        window.search_var = FakeVar("photo")
-        window.ext_var = FakeVar("All")
-        window.count_var = FakeVar()
-        window.status_var = FakeVar()
-        window.file_list = Mock()
-        window.search_engine = Mock()
-        window.search_engine.search.side_effect = SearchQueryError(
+        window = make_async_search_window()
+        window.search_engine.search_page.side_effect = SearchQueryError(
             "Search could not be completed. Try rebuilding the index or "
             "using a simpler query."
         )
 
         with self.assertLogs("ui.main_window", level="ERROR"):
             window._do_search()
+            window._search_executor.finish()
+            window.root.run_callbacks()
 
         window.file_list.clear.assert_called_once_with()
         self.assertEqual(window.count_var.value, "Search unavailable")
         self.assertIn("Search could not be completed", window.status_var.value)
+
+    def test_main_window_ignores_a_stale_async_search_result(self):
+        window = make_async_search_window()
+
+        def page_for_query(device, query, *args):
+            return SearchPage(
+                items=[{
+                    "id": 1,
+                    "name": f"{query}.txt",
+                    "path": f"/{query}.txt",
+                    "size": 1,
+                    "modified": None,
+                    "is_dir": False,
+                    "extension": ".txt",
+                }],
+                total=1,
+                offset=0,
+            )
+
+        window.search_engine.search_page.side_effect = page_for_query
+        window._do_search()
+        self.assertTrue(window._search_executor.start(0))
+
+        window.search_var.set("report")
+        window._do_search()
+        window._search_executor.finish(0)
+        window.root.run_callbacks()
+        window.file_list.set_virtual_results.assert_not_called()
+
+        window._search_executor.finish(1)
+        window.root.run_callbacks()
+        applied_items = window.file_list.set_virtual_results.call_args.args[2]
+        self.assertEqual(applied_items[0]["name"], "report.txt")
+
+    def test_typing_invalidates_the_running_query_before_debounce(self):
+        window = make_async_search_window()
+        window.search_engine.search_page.return_value = SearchPage(
+            items=[],
+            total=0,
+            offset=0,
+        )
+        window._do_search()
+        self.assertTrue(window._search_executor.start(0))
+        running_generation = window._search_generation
+
+        window.search_var.set("report")
+        window._on_search_changed()
+        self.assertGreater(window._search_generation, running_generation)
+        self.assertIsNone(window._active_search)
+
+        window._search_executor.finish(0)
+        window.root.run_callbacks()
+        window.file_list.set_virtual_results.assert_not_called()
+
+    def test_worker_completion_is_marshaled_through_the_ui_poller(self):
+        window = make_async_search_window()
+        window.search_engine.search_page.return_value = SearchPage(
+            items=[],
+            total=0,
+            offset=0,
+        )
+
+        window._do_search()
+        worker = threading.Thread(target=window._search_executor.finish)
+        worker.start()
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        window.file_list.set_virtual_results.assert_not_called()
+        self.assertEqual(
+            window.root.after_threads,
+            [window.root.owner_thread],
+        )
+
+        window.root.run_callbacks()
+        window.file_list.set_virtual_results.assert_called_once()
+
+    def test_rapid_scrolling_discards_old_queued_pages(self):
+        window = make_async_search_window()
+        generation = 1
+        search_spec = ("device-1", "photo", None, "name", False)
+        window._search_generation = generation
+        window._active_search = search_spec
+        window._active_search_total = 1000
+
+        for offset in (256, 512, 768):
+            window._request_search_page(
+                generation,
+                search_spec,
+                offset,
+                256,
+            )
+
+        first_future = window._search_executor.jobs[0][0]
+        self.assertTrue(first_future.cancelled())
+        window.file_list.page_failed.assert_called_once_with(256)
+        self.assertEqual(
+            window._search_pages_in_flight,
+            {(generation, 512), (generation, 768)},
+        )
 
 
 class TrigramMigrationTests(unittest.TestCase):

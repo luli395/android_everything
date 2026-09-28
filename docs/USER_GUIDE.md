@@ -156,7 +156,11 @@ Punctuation is treated as a separator rather than SQLite query syntax, so
 quotes, parentheses, brackets, and hyphens can be entered without causing a
 search error.
 
-The application displays up to 10,000 results per search.
+Search runs outside the UI thread. If you type another query before an earlier
+one finishes, the obsolete result is ignored. The result list represents the
+complete match count while loading SQLite pages on demand and creating only
+enough visual rows for the current viewport, so large indexes do not require
+thousands of Treeview widgets at once.
 
 ### 5.2 Filter by file type
 

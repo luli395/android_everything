@@ -6,6 +6,7 @@ import os
 import re
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 from datetime import datetime, timedelta
 from contextlib import contextmanager
@@ -18,10 +19,26 @@ FTS_SCHEMA_VERSION = 2
 TRIGRAM_MIN_LENGTH = 3
 TRIGRAM_TOKENIZER = "trigram"
 STAGING_RETENTION_DAYS = 1
+SEARCH_SORT_EXPRESSIONS = {
+    "name": "f.name_normalized",
+    "path": "f.path_normalized",
+    "size": "COALESCE(f.size, 0)",
+    "modified": "COALESCE(f.modified, '')",
+    "extension": "COALESCE(f.extension, '') COLLATE NOCASE",
+}
 
 
 class SearchQueryError(RuntimeError):
     """Raised when SQLite cannot complete a file search."""
+
+
+@dataclass(frozen=True)
+class SearchPage:
+    """One bounded page from a potentially much larger result set."""
+
+    items: List[dict]
+    total: int
+    offset: int
 
 
 def extract_search_terms(query: str) -> List[str]:
@@ -577,12 +594,46 @@ class Database:
         extension_filter: Optional[str] = None
     ) -> List[dict]:
         """Search indexed files and expose a stable application error."""
+        return self.search_page(
+            device_serial,
+            query,
+            limit=limit,
+            extension_filter=extension_filter,
+            # The legacy list-returning API does not expose a total.
+            known_total=0,
+        ).items
+
+    def search_page(
+        self,
+        device_serial: str,
+        query: str,
+        offset: int = 0,
+        limit: int = 200,
+        extension_filter: Optional[str] = None,
+        sort_column: str = "name",
+        sort_reverse: bool = False,
+        known_total: Optional[int] = None,
+    ) -> SearchPage:
+        """Return a count and one sorted page for a virtual result list."""
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero")
+        if sort_column not in SEARCH_SORT_EXPRESSIONS:
+            raise ValueError(f"Unsupported search sort column: {sort_column}")
+        if known_total is not None and known_total < 0:
+            raise ValueError("known_total must not be negative")
+
         try:
-            return self._search(
+            return self._search_page(
                 device_serial,
                 query,
+                offset=offset,
                 limit=limit,
                 extension_filter=extension_filter,
+                sort_column=sort_column,
+                sort_reverse=sort_reverse,
+                known_total=known_total,
             )
         except sqlite3.OperationalError as error:
             raise SearchQueryError(
@@ -590,25 +641,18 @@ class Database:
                 "or using a simpler query."
             ) from error
 
-    def _search(
-        self, 
-        device_serial: str, 
-        query: str, 
-        limit: int = 1000,
-        extension_filter: Optional[str] = None
-    ) -> List[dict]:
-        """
-        Search files using FTS5.
-        
-        Args:
-            device_serial: Device serial number
-            query: Search query
-            limit: Maximum results
-            extension_filter: Optional extension filter (e.g., ".jpg")
-            
-        Returns:
-            List of file dictionaries
-        """
+    def _search_page(
+        self,
+        device_serial: str,
+        query: str,
+        offset: int,
+        limit: int,
+        extension_filter: Optional[str],
+        sort_column: str,
+        sort_reverse: bool,
+        known_total: Optional[int],
+    ) -> SearchPage:
+        """Execute one paged search using only whitelisted ORDER BY SQL."""
         query = query.strip()
         terms = extract_search_terms(query) if query else []
         normalized_terms = [
@@ -625,67 +669,62 @@ class Database:
         # empty result rather than passing invalid syntax to MATCH or treating
         # the input as an empty query that displays every indexed file.
         if query and not terms:
-            return []
+            return SearchPage(items=[], total=0, offset=offset)
+
+        from_sql = "FROM files f"
+        params = [device_serial]
+        if fts_query:
+            from_sql += " INNER JOIN files_fts fts ON f.id = fts.rowid"
+
+        conditions = ["f.device_serial = ?"]
+        if fts_query:
+            conditions.append("files_fts MATCH ?")
+            params.append(fts_query)
+
+        for term in short_terms:
+            conditions.append('''
+                (
+                    instr(f.name_normalized, ?) > 0
+                    OR instr(f.path_normalized, ?) > 0
+                )
+            ''')
+            params.extend((term, term))
+
+        if extension_filter:
+            conditions.append("f.extension = ?")
+            params.append(extension_filter.lower())
+
+        where_sql = " WHERE " + " AND ".join(conditions)
+        direction = "DESC" if sort_reverse else "ASC"
+        sort_expression = SEARCH_SORT_EXPRESSIONS[sort_column]
+        order_sql = (
+            f" ORDER BY {sort_expression} {direction}, "
+            "f.path COLLATE NOCASE ASC, f.id ASC"
+        )
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            
-            if not query.strip():
-                # No query, return all files
-                sql = '''
-                    SELECT id, name, path, size, modified, is_dir, extension
-                    FROM files
-                    WHERE device_serial = ?
-                '''
-                params = [device_serial]
-                
-                if extension_filter:
-                    sql += " AND extension = ?"
-                    params.append(extension_filter.lower())
-                
-                sql += " ORDER BY name LIMIT ?"
-                params.append(limit)
-                
+            # Keep count and page on the same snapshot if a completed index is
+            # published between the two statements.
+            cursor.execute("BEGIN")
+            if known_total is None:
+                cursor.execute(
+                    "SELECT COUNT(*) " + from_sql + where_sql,
+                    params,
+                )
+                total = cursor.fetchone()[0]
             else:
-                # Trigram FTS provides arbitrary substring matching for terms
-                # of at least three code points. Shorter terms use the regular
-                # content table with pre-normalized Unicode instr() checks.
-                sql = '''
-                    SELECT f.id, f.name, f.path, f.size, f.modified,
-                           f.is_dir, f.extension
-                    FROM files f
-                '''
-                params = [device_serial]
+                total = known_total
 
-                if fts_query:
-                    sql += " INNER JOIN files_fts fts ON f.id = fts.rowid"
-
-                sql += " WHERE f.device_serial = ?"
-
-                if fts_query:
-                    sql += " AND files_fts MATCH ?"
-                    params.append(fts_query)
-
-                for term in short_terms:
-                    sql += '''
-                        AND (
-                            instr(f.name_normalized, ?) > 0
-                            OR instr(f.path_normalized, ?) > 0
-                        )
-                    '''
-                    params.extend((term, term))
-                
-                if extension_filter:
-                    sql += " AND f.extension = ?"
-                    params.append(extension_filter.lower())
-                
-                if fts_query:
-                    sql += " ORDER BY fts.rank, f.name COLLATE NOCASE LIMIT ?"
-                else:
-                    sql += " ORDER BY f.name COLLATE NOCASE LIMIT ?"
-                params.append(limit)
-
-            cursor.execute(sql, params)
+            sql = (
+                "SELECT f.id, f.name, f.path, f.size, f.modified, "
+                "f.is_dir, f.extension "
+                + from_sql
+                + where_sql
+                + order_sql
+                + " LIMIT ? OFFSET ?"
+            )
+            cursor.execute(sql, params + [limit, offset])
             
             results = []
             for row in cursor.fetchall():
@@ -699,7 +738,8 @@ class Database:
                     "extension": row["extension"],
                 })
             
-            return results
+            conn.commit()
+            return SearchPage(items=results, total=total, offset=offset)
     
     def delete_files(self, device_serial: str, paths: list):
         """Delete specific files from the index."""

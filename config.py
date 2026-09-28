@@ -89,7 +89,14 @@ COLORS = {
 
 # Search settings
 SEARCH_DELAY_MS = 150  # Delay before searching after typing stops
-MAX_RESULTS_DISPLAY = 10000  # Maximum results to display in list
+MAX_RESULTS_DISPLAY = 10000  # Legacy list-returning search API limit
+SEARCH_PAGE_SIZE = 256  # Rows fetched for each virtual-list page
+SEARCH_WORKER_COUNT = 2  # Concurrent local SQLite page queries
+SEARCH_COMPLETION_POLL_MS = 16  # Marshal worker results onto Tk's UI thread
+VIRTUAL_LIST_ROW_HEIGHT = 28
+VIRTUAL_LIST_HEADER_HEIGHT = 28
+VIRTUAL_LIST_DEFAULT_ROWS = 24
+VIRTUAL_LIST_MAX_CACHED_PAGES = 8
 
 # File type icons (emoji for simplicity)
 FILE_ICONS = {

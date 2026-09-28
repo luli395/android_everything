@@ -30,6 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from adb_wrapper import DeviceInfo  # noqa: E402
+from database import SearchPage  # noqa: E402
 import ui.main_window as main_window_module  # noqa: E402
 
 
@@ -123,6 +124,36 @@ class DemoSearchEngine:
             ]
         return results
 
+    def search_page(
+        self,
+        device_serial: str,
+        query: str,
+        offset: int,
+        limit: int,
+        extension_filter: Optional[str] = None,
+        sort_column: str = "name",
+        sort_reverse: bool = False,
+        known_total: Optional[int] = None,
+    ) -> SearchPage:
+        """Mirror the paged backend used by the asynchronous result list."""
+        results = self.search(device_serial, query, extension_filter)
+
+        def sort_key(item: dict):
+            value = item.get(sort_column)
+            if isinstance(value, str):
+                return value.casefold()
+            return value or 0
+
+        # Match the application's deterministic path tie-break without
+        # reversing equal primary keys for descending sorts.
+        results.sort(key=lambda item: item["path"].casefold())
+        results.sort(key=sort_key, reverse=sort_reverse)
+        return SearchPage(
+            items=results[offset:offset + limit],
+            total=len(results),
+            offset=offset,
+        )
+
 
 class DemoADB:
     """Expose one obviously synthetic connected device."""
@@ -140,7 +171,12 @@ class DemoADB:
 class DemoIndexer:
     """Placeholder used while the script drives progress states explicitly."""
 
-    def __init__(self, adb: DemoADB, db: object) -> None:
+    def __init__(
+        self,
+        adb: DemoADB,
+        db: object,
+        mutation_coordinator=None,
+    ) -> None:
         self.is_indexing = False
 
     def cancel(self) -> None:
@@ -155,6 +191,18 @@ def _pump_events(root, seconds: float = 0.08) -> None:
         time.sleep(0.01)
     root.update_idletasks()
     root.update()
+
+
+def _wait_for_search(window, timeout: float = 2.0) -> None:
+    """Wait deterministically for the demo's asynchronous page to render."""
+    deadline = time.monotonic() + timeout
+    while window.count_var.get() == "Searching...":
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Timed out while rendering a demo search")
+        window.root.update()
+        time.sleep(0.01)
+    window.root.update_idletasks()
+    window.root.update()
 
 
 def _capture_client(window) -> Image.Image:
@@ -359,11 +407,13 @@ def _build_base_screens() -> Tuple[Dict[str, Image.Image], object]:
     window._search_has_focus = True
     window.search_var.set("")
     window._do_search()
+    _wait_for_search(window)
     screens["search_empty"] = _capture_client(window)
 
     for query in ("p", "ph", "pho", "phot", "photo"):
         window.search_var.set(query)
         window._do_search()
+        _wait_for_search(window)
         screens[f"query_{query}"] = _capture_client(window)
 
     window.root.tk.call("ttk::combobox::Post", window.ext_combo)
@@ -372,6 +422,7 @@ def _build_base_screens() -> Tuple[Dict[str, Image.Image], object]:
 
     window.ext_var.set("JPG")
     window._do_search()
+    _wait_for_search(window)
     window.count_var.set("1 file")
     screens["filtered"] = _capture_client(window)
 
@@ -548,7 +599,7 @@ def main() -> int:
         )
     finally:
         window.context_menu.unpost()
-        window.root.destroy()
+        window._on_close()
 
     size_mib = args.output.resolve().stat().st_size / (1024 * 1024)
     duration = len(frames) / args.fps

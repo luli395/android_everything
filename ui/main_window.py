@@ -3,7 +3,9 @@ Main application window for Android Everything.
 """
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 import logging
+from queue import Empty, Queue
 import threading
 from typing import Callable, List, Optional
 import os
@@ -14,7 +16,15 @@ from ui.file_list import FileListView
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import WINDOW_TITLE, WINDOW_WIDTH, WINDOW_HEIGHT, SEARCH_DELAY_MS
+from config import (
+    SEARCH_COMPLETION_POLL_MS,
+    SEARCH_DELAY_MS,
+    SEARCH_PAGE_SIZE,
+    SEARCH_WORKER_COUNT,
+    WINDOW_HEIGHT,
+    WINDOW_TITLE,
+    WINDOW_WIDTH,
+)
 from adb_wrapper import get_adb, ADBWrapper, DeviceInfo, ADBError
 from file_indexer import FileIndexer
 from search_engine import get_search_engine, SearchEngine
@@ -72,11 +82,25 @@ class MainWindow:
         self._devices: List[DeviceInfo] = []
         self._current_device: Optional[str] = None
         self._search_timer: Optional[str] = None
+        self._search_generation = 0
+        self._active_search = None
+        self._active_search_total = None
+        self._search_pages_in_flight = set()
+        self._search_futures = set()
+        self._search_future_requests = {}
+        self._search_completions = Queue()
+        self._search_poll_timer = None
+        self._search_executor = ThreadPoolExecutor(
+            max_workers=SEARCH_WORKER_COUNT,
+            thread_name_prefix="android-everything-search",
+        )
+        self._closing = False
         self._device_operation_count = 0
         self._delete_in_progress = False
         
         # Build UI
         self._setup_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         
         # Initial device check, or a non-fatal setup notice if ADB is missing.
         if self.adb:
@@ -279,7 +303,8 @@ class MainWindow:
         self.file_list = FileListView(
             content,
             on_double_click=self._on_file_double_click,
-            on_right_click=self._on_file_right_click
+            on_right_click=self._on_file_right_click,
+            on_sort_changed=self._on_search_sort_changed,
         )
         self.file_list.grid(row=0, column=0, sticky="nsew")
         
@@ -346,42 +371,255 @@ class MainWindow:
         """Handle search text change with debounce."""
         if self._search_timer:
             self.root.after_cancel(self._search_timer)
-        
+
+        # Invalidate the running query immediately rather than waiting for the
+        # debounce interval. Otherwise an older result can briefly replace the
+        # list after the entry already contains newer text.
+        self._invalidate_search()
         self._search_timer = self.root.after(SEARCH_DELAY_MS, self._do_search)
-    
+
+    def _invalidate_search(self):
+        """Invalidate callbacks and cancel page queries that have not started."""
+        self._search_generation = getattr(self, "_search_generation", 0) + 1
+        self._active_search = None
+        self._active_search_total = None
+        self._search_pages_in_flight = set()
+        futures = getattr(self, "_search_futures", set())
+        self._search_futures = futures
+        for future in tuple(futures):
+            future.cancel()
+        futures.clear()
+        self._search_future_requests = {}
+        return self._search_generation
+
     def _do_search(self):
-        """Execute the search."""
+        """Start an asynchronous first-page search."""
+        if self._search_timer:
+            try:
+                self.root.after_cancel(self._search_timer)
+            except tk.TclError:
+                pass
+        self._search_timer = None
         if not self._current_device:
+            self._invalidate_search()
+            self.file_list.clear()
+            self.count_var.set("0 files")
             return
-        
+
         query = self.search_var.get()
         if query == "Search files...":
             query = ""
-        
-        # Get extension filter
+
         ext_filter = None
         if self.ext_var.get() != "All":
             ext_filter = "." + self.ext_var.get().lower()
-        
-        # Search. Keep malformed/corrupt database queries from escaping the
-        # Tkinter event callback and terminating the UI.
-        try:
-            results = self.search_engine.search(
-                self._current_device,
-                query,
-                extension_filter=ext_filter
-            )
-        except SearchQueryError as error:
-            logger.exception("Search query failed")
-            self.file_list.clear()
-            self.count_var.set("Search unavailable")
-            self.status_var.set(str(error))
+
+        generation = self._invalidate_search()
+        search_spec = (
+            self._current_device,
+            query,
+            ext_filter,
+            getattr(self.file_list, "sort_column", "name"),
+            bool(getattr(self.file_list, "sort_reverse", False)),
+        )
+        self._active_search = search_spec
+        self.file_list.begin_search()
+        self.count_var.set("Searching...")
+        self.status_var.set("Searching local index...")
+        self._request_search_page(
+            generation,
+            search_spec,
+            offset=0,
+            limit=SEARCH_PAGE_SIZE,
+            initial=True,
+        )
+
+    def _request_search_page(
+        self,
+        generation: int,
+        search_spec: tuple,
+        offset: int,
+        limit: int,
+        initial: bool = False,
+    ):
+        """Submit one database page without blocking Tk's event loop."""
+        if (
+            generation != self._search_generation
+            or search_spec != self._active_search
+            or getattr(self, "_closing", False)
+        ):
             return
-        
-        # Update file list
-        self.file_list.set_files(results)
-        self.count_var.set(f"{len(results):,} files")
-        self.status_var.set("Ready")
+
+        request_key = (generation, offset)
+        if request_key in self._search_pages_in_flight:
+            return
+        self._search_pages_in_flight.add(request_key)
+        device_serial, query, ext_filter, sort_column, sort_reverse = search_spec
+
+        try:
+            future = self._search_executor.submit(
+                self.search_engine.search_page,
+                device_serial,
+                query,
+                offset,
+                limit,
+                ext_filter,
+                sort_column,
+                sort_reverse,
+                None if initial else self._active_search_total,
+            )
+        except Exception as error:
+            self._apply_search_page(
+                generation,
+                search_spec,
+                offset,
+                None,
+                error,
+                initial,
+            )
+            return
+        self._search_futures.add(future)
+        self._search_future_requests[future] = (
+            generation,
+            offset,
+            initial,
+        )
+        if not initial:
+            self._trim_pending_page_searches(generation)
+
+        def completed(completed_future):
+            try:
+                page = completed_future.result()
+                error = None
+            except CancelledError:
+                return
+            except Exception as query_error:
+                page = None
+                error = query_error
+
+            # Tk calls are restricted to the UI thread. The UI-side poller
+            # drains this thread-safe queue and applies completed pages.
+            self._search_completions.put((
+                generation,
+                search_spec,
+                offset,
+                page,
+                error,
+                initial,
+                completed_future,
+            ))
+
+        future.add_done_callback(completed)
+        self._ensure_search_completion_poll()
+
+    def _ensure_search_completion_poll(self):
+        """Schedule one UI-thread poll while search work is outstanding."""
+        if self._closing or self._search_poll_timer is not None:
+            return
+        self._search_poll_timer = self.root.after(
+            SEARCH_COMPLETION_POLL_MS,
+            self._poll_search_completions,
+        )
+
+    def _poll_search_completions(self):
+        """Apply queued worker results exclusively from Tk's UI thread."""
+        self._search_poll_timer = None
+        while True:
+            try:
+                completion = self._search_completions.get_nowait()
+            except Empty:
+                break
+            self._apply_search_page(*completion)
+
+        if self._search_futures and not self._closing:
+            self._ensure_search_completion_poll()
+
+    def _trim_pending_page_searches(self, generation: int):
+        """Keep only the newest queued viewport pages during rapid scrolling."""
+        queued = [
+            (future, request)
+            for future, request in self._search_future_requests.items()
+            if (
+                request[0] == generation
+                and not request[2]
+                and not future.running()
+                and not future.done()
+            )
+        ]
+        while len(queued) > SEARCH_WORKER_COUNT:
+            future, (_, offset, _) = queued.pop(0)
+            if not future.cancel():
+                continue
+            self._search_futures.discard(future)
+            self._search_future_requests.pop(future, None)
+            self._search_pages_in_flight.discard((generation, offset))
+            self.file_list.page_failed(offset)
+
+    def _apply_search_page(
+        self,
+        generation: int,
+        search_spec: tuple,
+        offset: int,
+        page,
+        error: Optional[Exception],
+        initial: bool,
+        future=None,
+    ):
+        """Apply a worker result only if it still belongs to the active query."""
+        if future is not None:
+            self._search_futures.discard(future)
+            self._search_future_requests.pop(future, None)
+        self._search_pages_in_flight.discard((generation, offset))
+        if (
+            generation != self._search_generation
+            or search_spec != self._active_search
+            or getattr(self, "_closing", False)
+        ):
+            return
+
+        if error is not None:
+            logger.error("Asynchronous search query failed: %s", error)
+            if initial:
+                self.file_list.clear()
+                self.count_var.set("Search unavailable")
+                if isinstance(error, SearchQueryError):
+                    self.status_var.set(str(error))
+                else:
+                    self.status_var.set(
+                        "Search could not be completed. Try again."
+                    )
+            else:
+                self.file_list.page_failed(offset)
+                self.status_var.set("Could not load this result page.")
+            return
+
+        if initial:
+            self._active_search_total = page.total
+            self.file_list.set_virtual_results(
+                page.total,
+                page.offset,
+                page.items,
+                lambda page_offset, page_limit: self._request_search_page(
+                    generation,
+                    search_spec,
+                    page_offset,
+                    page_limit,
+                ),
+            )
+            self.count_var.set(f"{page.total:,} files")
+            self.status_var.set("Ready")
+            return
+
+        # Defensively reject a provider response that does not belong to the
+        # logical result length captured by the first page.
+        if page.total != self._active_search_total:
+            self._do_search()
+            return
+        self.file_list.set_page(page.offset, page.items)
+
+    def _on_search_sort_changed(self, column: str, reverse: bool):
+        """Requery SQLite so sorting covers all logical rows, not one page."""
+        self._do_search()
     
     def _refresh_devices(self):
         """Refresh the list of connected devices."""
@@ -405,6 +643,7 @@ class MainWindow:
                 
                 self.status_var.set(f"{len(self._devices)} device(s) connected")
             else:
+                self._invalidate_search()
                 self.device_combo.configure(values=["No device"])
                 self.device_var.set("No device")
                 self._current_device = None
@@ -417,6 +656,7 @@ class MainWindow:
         """Handle device selection."""
         idx = self.device_combo.current()
         if idx >= 0 and idx < len(self._devices):
+            self._invalidate_search()
             device = self._devices[idx]
             self._current_device = device.serial
             
@@ -872,6 +1112,21 @@ class MainWindow:
         if self._current_device == device_serial:
             self._do_search()
     
+    def _on_close(self):
+        """Stop accepting search results before destroying the Tk interpreter."""
+        if self._closing:
+            return
+        self._closing = True
+        self._invalidate_search()
+        if self._search_poll_timer is not None:
+            try:
+                self.root.after_cancel(self._search_poll_timer)
+            except tk.TclError:
+                pass
+            self._search_poll_timer = None
+        self._search_executor.shutdown(wait=False)
+        self.root.destroy()
+
     def run(self):
         """Run the application."""
         # Center window
