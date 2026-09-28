@@ -3,7 +3,7 @@ Search engine for querying indexed files.
 """
 import threading
 from typing import List, Optional
-from database import Database, SearchPage, get_database
+from database import Database, SearchPage, get_database, check_search_cancelled
 from config import MAX_RESULTS_DISPLAY
 
 
@@ -81,8 +81,10 @@ class SearchEngine:
         sort_column: str = "name",
         sort_reverse: bool = False,
         known_total: Optional[int] = None,
+        cancel_event=None,
     ) -> SearchPage:
         """Return one cached database page for the virtual file list."""
+        check_search_cancelled(cancel_event)
         query = query.strip().lower()
         cache_key = (
             "page",
@@ -108,7 +110,9 @@ class SearchEngine:
             sort_column=sort_column,
             sort_reverse=sort_reverse,
             known_total=known_total,
+            cancel_event=cancel_event,
         )
+        check_search_cancelled(cancel_event)
         self._store_cached(cache_key, page, epoch)
         return page
     

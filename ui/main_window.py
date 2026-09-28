@@ -379,7 +379,11 @@ class MainWindow:
         self._search_timer = self.root.after(SEARCH_DELAY_MS, self._do_search)
 
     def _invalidate_search(self):
-        """Invalidate callbacks and cancel page queries that have not started."""
+        """Signal running SQL queries and cancel queued page requests."""
+        previous_cancel = getattr(self, "_search_cancel_event", None)
+        if previous_cancel is not None:
+            previous_cancel.set()
+        self._search_cancel_event = threading.Event()
         self._search_generation = getattr(self, "_search_generation", 0) + 1
         self._active_search = None
         self._active_search_total = None
@@ -467,6 +471,7 @@ class MainWindow:
                 sort_column,
                 sort_reverse,
                 None if initial else self._active_search_total,
+                cancel_event=getattr(self, "_search_cancel_event", None),
             )
         except Exception as error:
             self._apply_search_page(

@@ -67,7 +67,9 @@ class ManualExecutor:
     def __init__(self):
         self.jobs = []
 
-    def submit(self, function, *args):
+    def submit(self, function, *args, **kwargs):
+        from functools import partial
+        function = partial(function, **kwargs)
         future = Future()
         self.jobs.append((future, function, args))
         return future
@@ -214,7 +216,7 @@ class SpecialCharacterSearchTests(unittest.TestCase):
     def test_main_window_ignores_a_stale_async_search_result(self):
         window = make_async_search_window()
 
-        def page_for_query(device, query, *args):
+        def page_for_query(device, query, *args, **kwargs):
             return SearchPage(
                 items=[{
                     "id": 1,

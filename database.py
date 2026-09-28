@@ -1,6 +1,7 @@
 """
 SQLite database for file indexing with FTS5 full-text search.
 """
+from concurrent.futures import CancelledError
 import sqlite3
 import os
 import re
@@ -30,6 +31,30 @@ SEARCH_SORT_EXPRESSIONS = {
 
 class SearchQueryError(RuntimeError):
     """Raised when SQLite cannot complete a file search."""
+
+
+def check_search_cancelled(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise CancelledError("Search cancelled")
+
+
+@contextmanager
+def cancellable_search(conn, cancel_event):
+    """Interrupt only this search connection, including count and sort work."""
+    check_search_cancelled(cancel_event)
+    if cancel_event is not None:
+        conn.set_progress_handler(lambda: int(cancel_event.is_set()), 1000)
+    try:
+        yield
+        check_search_cancelled(cancel_event)
+    except sqlite3.OperationalError as error:
+        if (cancel_event is not None and cancel_event.is_set()
+                and str(error) == "interrupted"):
+            raise CancelledError("Search cancelled") from error
+        raise
+    finally:
+        if cancel_event is not None:
+            conn.set_progress_handler(None, 0)
 
 
 @dataclass(frozen=True)
@@ -613,6 +638,7 @@ class Database:
         sort_column: str = "name",
         sort_reverse: bool = False,
         known_total: Optional[int] = None,
+        cancel_event=None,
     ) -> SearchPage:
         """Return a count and one sorted page for a virtual result list."""
         if offset < 0:
@@ -634,6 +660,7 @@ class Database:
                 sort_column=sort_column,
                 sort_reverse=sort_reverse,
                 known_total=known_total,
+                cancel_event=cancel_event,
             )
         except sqlite3.OperationalError as error:
             raise SearchQueryError(
@@ -651,8 +678,10 @@ class Database:
         sort_column: str,
         sort_reverse: bool,
         known_total: Optional[int],
+        cancel_event=None,
     ) -> SearchPage:
         """Execute one paged search using only whitelisted ORDER BY SQL."""
+        check_search_cancelled(cancel_event)
         query = query.strip()
         terms = extract_search_terms(query) if query else []
         normalized_terms = [
@@ -703,43 +732,44 @@ class Database:
         )
 
         with self._get_connection() as conn:
-            cursor = conn.cursor()
-            # Keep count and page on the same snapshot if a completed index is
-            # published between the two statements.
-            cursor.execute("BEGIN")
-            if known_total is None:
-                cursor.execute(
-                    "SELECT COUNT(*) " + from_sql + where_sql,
-                    params,
-                )
-                total = cursor.fetchone()[0]
-            else:
-                total = known_total
+            with cancellable_search(conn, cancel_event):
+                cursor = conn.cursor()
+                # Keep count and page on the same snapshot if a completed index is
+                # published between the two statements.
+                cursor.execute("BEGIN")
+                if known_total is None:
+                    cursor.execute(
+                        "SELECT COUNT(*) " + from_sql + where_sql,
+                        params,
+                    )
+                    total = cursor.fetchone()[0]
+                else:
+                    total = known_total
 
-            sql = (
-                "SELECT f.id, f.name, f.path, f.size, f.modified, "
-                "f.is_dir, f.extension "
-                + from_sql
-                + where_sql
-                + order_sql
-                + " LIMIT ? OFFSET ?"
-            )
-            cursor.execute(sql, params + [limit, offset])
+                sql = (
+                    "SELECT f.id, f.name, f.path, f.size, f.modified, "
+                    "f.is_dir, f.extension "
+                    + from_sql
+                    + where_sql
+                    + order_sql
+                    + " LIMIT ? OFFSET ?"
+                )
+                cursor.execute(sql, params + [limit, offset])
             
-            results = []
-            for row in cursor.fetchall():
-                results.append({
-                    "id": row["id"],
-                    "name": row["name"],
-                    "path": row["path"],
-                    "size": row["size"],
-                    "modified": row["modified"],
-                    "is_dir": bool(row["is_dir"]),
-                    "extension": row["extension"],
-                })
+                results = []
+                for row in cursor.fetchall():
+                    results.append({
+                        "id": row["id"],
+                        "name": row["name"],
+                        "path": row["path"],
+                        "size": row["size"],
+                        "modified": row["modified"],
+                        "is_dir": bool(row["is_dir"]),
+                        "extension": row["extension"],
+                    })
             
-            conn.commit()
-            return SearchPage(items=results, total=total, offset=offset)
+                conn.commit()
+                return SearchPage(items=results, total=total, offset=offset)
     
     def delete_files(self, device_serial: str, paths: list):
         """Delete specific files from the index."""

@@ -4,6 +4,14 @@ All notable changes to Android Everything are documented in this file.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-09-28
+
+### Fixed
+
+- Interrupt running SQLite searches when input changes or the window closes,
+  freeing search workers for the newest query. Cancelled searches are not
+  reported as errors or stored in the page cache.
+
 ### Changed
 
 - Replace recursive `ls` parsing with a versioned, NUL-delimited `find`/`stat`
@@ -136,7 +144,8 @@ All notable changes to Android Everything are documented in this file.
 - Keep the main window usable when ADB is not installed and display setup guidance instead of exiting.
 - Report packaged startup errors through a GUI dialog and persistent log rather than a console prompt.
 
-[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/luli395/android_everything/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/luli395/android_everything/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/luli395/android_everything/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/luli395/android_everything/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/luli395/android_everything/compare/v0.1.3...v0.1.4

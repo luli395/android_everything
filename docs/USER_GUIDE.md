@@ -88,8 +88,8 @@ Common device states:
 
 ### 3.1 Windows executable
 
-1. Open the [v0.1.6 release](https://github.com/luli395/android_everything/releases/tag/v0.1.6).
-2. Download [AndroidEverything-v0.1.6-windows.zip](https://github.com/luli395/android_everything/releases/download/v0.1.6/AndroidEverything-v0.1.6-windows.zip) and [AndroidEverything-v0.1.6-windows-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.6/AndroidEverything-v0.1.6-windows-SHA256.txt).
+1. Open the [v0.1.7 release](https://github.com/luli395/android_everything/releases/tag/v0.1.7).
+2. Download [AndroidEverything-v0.1.7-windows.zip](https://github.com/luli395/android_everything/releases/download/v0.1.7/AndroidEverything-v0.1.7-windows.zip) and [AndroidEverything-v0.1.7-windows-SHA256.txt](https://github.com/luli395/android_everything/releases/download/v0.1.7/AndroidEverything-v0.1.7-windows-SHA256.txt).
 3. Verify the ZIP, then extract every file into the same directory.
 4. Double-click `AndroidEverything.exe`.
 
@@ -98,8 +98,8 @@ Python is not required for the Windows executable. Windows may display a SmartSc
 To verify the downloaded executable, open PowerShell in its directory and run:
 
 ```powershell
-$expected = (Get-Content .\AndroidEverything-v0.1.6-windows-SHA256.txt).Split()[0]
-$actual = (Get-FileHash .\AndroidEverything-v0.1.6-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$expected = (Get-Content .\AndroidEverything-v0.1.7-windows-SHA256.txt).Split()[0]
+$actual = (Get-FileHash .\AndroidEverything-v0.1.7-windows.zip -Algorithm SHA256).Hash.ToLowerInvariant()
 $actual -eq $expected
 ```
 
@@ -273,3 +273,10 @@ Make sure an application supporting that file type is installed on the computer.
 ## 9. Exit Safely
 
 Wait for active downloads or indexing to finish before closing the window and disconnecting the USB cable. The local index remains available the next time the same device is connected. Rebuild the index after files on the device change.
+
+### Cancelling searches
+
+Changing the search input, switching the search, or closing the window signals
+running SQLite queries to stop. Cancelled results are silently discarded.
+Cancellation is cooperative: SQLite checks the signal during query execution;
+filesystem I/O or database lock waits may take longer to return.

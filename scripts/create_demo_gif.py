@@ -134,6 +134,7 @@ class DemoSearchEngine:
         sort_column: str = "name",
         sort_reverse: bool = False,
         known_total: Optional[int] = None,
+        cancel_event=None,
     ) -> SearchPage:
         """Mirror the paged backend used by the asynchronous result list."""
         results = self.search(device_serial, query, extension_filter)
